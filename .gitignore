@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+
+# PyInstaller build artifacts (regenerable via build_exe.py)
+build/
+dist/
+
+# Large build outputs (>= 50 MB)
+dist/installer/InterviewCopilot-Setup-1.0.0.exe
+
+# PyInstaller spec backups
+*.spec.bak
+
+# Logs
+app.log
+*.log
+
+# Secrets — config.json contains a live API key; never commit
+config.json
+
+# Environment files
+.env
+.env.*
+
+# OS junk
+.DS_Store
+Thumbs.db

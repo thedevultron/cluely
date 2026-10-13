@@ -1,0 +1,10 @@
+# InterviewCopilot — PySide6 only (do NOT add PyQt6; dual Qt bindings bloat the bundle to ~500MB).
+PySide6>=6.6
+numpy>=1.26
+sounddevice>=0.4.6
+soundcard>=0.4.2
+google-genai>=1.0.0
+pynput>=1.7.6
+httpx>=0.27
+pypdf>=4.0
+pyinstaller>=6.0
