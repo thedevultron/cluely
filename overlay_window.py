@@ -1,15 +1,13 @@
 """Stealth HUD overlay: capture-excluded, Alt+Tab-hidden, modern dark UI (PySide6)."""
-
 from __future__ import annotations
 
 import html
 import logging
-import os
 import re
 import sys
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal, Slot, QTimer
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -32,8 +30,8 @@ def _windows_build() -> int:
         if sys.platform != "win32":
             return 0
         import platform
+
         ver = str(platform.version() or "")
-        # "10.0.19041" -> build 19041
         parts = ver.split(".")
         return int(parts[-1]) if parts else 0
     except Exception:
@@ -52,8 +50,11 @@ def is_capture_exclusion_supported() -> bool:
 
 def apply_capture_exclusion(widget: QWidget) -> bool:
     """Hide window from screenshots / screenshare. Returns True on success."""
+    if sys.platform != "win32":
+        return False
     try:
         import ctypes
+
         hwnd = int(widget.winId())
         res = ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
         if not res:
@@ -67,8 +68,11 @@ def apply_capture_exclusion(widget: QWidget) -> bool:
 
 def get_capture_exclusion_status(widget: QWidget) -> bool:
     """Verify affinity is actually EXCLUDEFROMCAPTURE."""
+    if sys.platform != "win32":
+        return False
     try:
         import ctypes
+
         hwnd = int(widget.winId())
         aff = ctypes.c_uint32(0)
         ok = ctypes.windll.user32.GetWindowDisplayAffinity(hwnd, ctypes.byref(aff))
@@ -77,37 +81,106 @@ def get_capture_exclusion_status(widget: QWidget) -> bool:
         return False
 
 
-def _render_markdown_lite(text: str) -> str:
-    """Minimal markdown -> HTML: code blocks, inline code, bullets, bold, headings."""
+# ------------------------------------------------------------------ markdown
+# Escape first, then apply a small safe allow-list of replacements.
+# The user input can never inject HTML: every "<", ">", "&" is escaped before
+# we add our own tags. Inline code is protected so ** inside `...` stays literal.
+
+_CODE_FENCE_RE = re.compile(r"```([\s\S]*?)```")
+_INLINE_CODE_RE = re.compile(r"`([^`]+?)`")
+_BOLD_RE = re.compile(r"\*\*([^*]+?)\*\*")
+_HEADING_RE = re.compile(r"^\s*#{1,4}\s+(.+)$")
+_BULLET_RE = re.compile(r"^\s*[-*•]\s+(.+)$")
+_NUMBERED_RE = re.compile(r"^\s*(\d+)[.)]\s+(.+)$")
+
+
+def _inline(s: str) -> str:
+    """Bold + inline code for a single already-escaped line/segment."""
     try:
-        safe = html.escape(text)
-        # code blocks ```...```
-        parts = re.split(r"```", safe)
+        parts = _INLINE_CODE_RE.split(s)
+        out: list[str] = []
+        for i, p in enumerate(parts):
+            if i % 2 == 1:
+                out.append(
+                    f'<code style="background:#1f1f1f;padding:1px 5px;border-radius:4px;'
+                    f'font-family:"Roboto Mono","Segoe UI",Consolas,monospace;color:#27f795;">{p}</code>'
+                )
+            else:
+                out.append(_BOLD_RE.sub(r"<b>\1</b>", p))
+        return "".join(out)
+    except Exception:
+        return s
+
+
+def _render_plain_segment(seg: str) -> str:
+    """Render one non-code segment line-by-line; no double <br> after blocks."""
+    try:
+        lines = seg.split("\n")
+        out: list[str] = []
+        for idx, line in enumerate(lines):
+            is_last = idx == len(lines) - 1
+            if line.strip() == "":
+                if not is_last:
+                    out.append("<br>")
+                continue
+            m = _HEADING_RE.match(line)
+            if m:
+                out.append(
+                    f'<div style="color:#27f795;font-weight:bold;margin:6px 0 2px;font-size:13px;">'
+                    f"{_inline(m.group(1))}</div>"
+                )
+                continue
+            m = _BULLET_RE.match(line)
+            if m:
+                out.append(f'<div style="margin:2px 0 2px 6px;">• {_inline(m.group(1))}</div>')
+                continue
+            m = _NUMBERED_RE.match(line)
+            if m:
+                out.append(
+                    f'<div style="margin:2px 0 2px 6px;">'
+                    f'<b style="color:#27f795;">{m.group(1)}.</b> {_inline(m.group(2))}</div>'
+                )
+                continue
+            # plain line: <br> separates it from the next line, never doubled
+            out.append(f'<span style="color:#d9d9d9;">{_inline(line)}</span>')
+            if not is_last:
+                out.append("<br>")
+        return "".join(out)
+    except Exception:
+        return html.escape(seg).replace("\n", "<br>")
+
+
+def _render_markdown_lite(text: str) -> str:
+    """Minimal markdown -> HTML: code blocks, inline code, bullets, bold, headings.
+
+    Escapes first, then adds only safe tags. No double <br> bugs.
+    """
+    try:
+        safe = html.escape(str(text))
+        parts = _CODE_FENCE_RE.split(safe)
         out: list[str] = []
         for i, chunk in enumerate(parts):
             if i % 2 == 1:
+                # inside ``` ... ``` (already escaped, preserve newlines in <pre>)
+                inner = chunk
+                # strip a single surrounding newline pair added by fences, keep indent
+                if inner.startswith("\n"):
+                    inner = inner[1:]
+                if inner.endswith("\n"):
+                    inner = inner[:-1]
                 out.append(
-                    f'<pre style="background:rgba(255,255,255,8);border:1px solid rgba(255,255,255,14);'
-                    f'border-radius:8px;padding:8px;font-family:Consolas,monospace;font-size:12px;'
-                    f'color:#aef3c1;white-space:pre-wrap;">{chunk.strip(chr(10))}</pre>'
+                    f'<pre style="background:#151515;border:1px solid #353535;'
+                    f'border-radius:8px;padding:8px;font-family:"Roboto Mono","Segoe UI",Consolas,monospace;font-size:12px;'
+                    f'color:#27f795;white-space:pre-wrap;margin:4px 0;">{inner}</pre>'
                 )
             else:
-                c = chunk
-                # inline code `x`
-                c = re.sub(r"`([^`]+)`", r'<code style="background:rgba(255,255,255,10);padding:1px 5px;border-radius:4px;color:#ffd479;">\1</code>', c)
-                # bold **x**
-                c = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", c)
-                # headings ### x
-                c = re.sub(r"(?m)^#{1,4}\s*(.+)$", r'<div style="color:#7ef0c1;font-weight:bold;margin:6px 0 2px;">\1</div>', c)
-                # bullets - / * / •
-                c = re.sub(r"(?m)^\s*[-*•]\s+(.+)$", r'<div style="margin:2px 0;">• \1</div>', c)
-                # numbered 1. x
-                c = re.sub(r"(?m)^\s*(\d+)[.)]\s+(.+)$", r'<div style="margin:2px 0;"><b style="color:#7ef0c1;">\1.</b> \2</div>', c)
-                c = c.replace("\n", "<br>")
-                out.append(f'<span style="color:#f2f2f2;">{c}</span>')
+                out.append(_render_plain_segment(chunk))
         return "".join(out)
     except Exception:
-        return html.escape(text).replace("\n", "<br>")
+        try:
+            return html.escape(str(text)).replace("\n", "<br>")
+        except Exception:
+            return ""
 
 
 class OverlayWindow(QWidget):
@@ -121,6 +194,8 @@ class OverlayWindow(QWidget):
     status_signal = Signal(str)
     opacity_signal = Signal(float)
 
+    MAX_HISTORY_CHARS = 20000
+
     def __init__(
         self,
         font_size: int = 14,
@@ -128,6 +203,15 @@ class OverlayWindow(QWidget):
         auto_resize: bool = True,
         parent=None,
     ) -> None:
+        # init flags BEFORE super().__init__ triggers changeEvent/showEvent
+        self._click_through = False
+        self._paused = False
+        self._drag_pos = None
+        self._hotkeys = None
+        self._auto_resize = bool(auto_resize)
+        self._stealth_ok: Optional[bool] = None
+        self._excl_pending = False
+        self._excl_initial_done = False
         super().__init__(
             parent,
             Qt.FramelessWindowHint
@@ -140,12 +224,7 @@ class OverlayWindow(QWidget):
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setWindowTitle("System Audio Helper")
         self.resize(460, 340)
-        self._click_through = False
-        self._paused = False
-        self._drag_pos = None
-        self._hotkeys = None
-        self._auto_resize = bool(auto_resize)
-        self._stealth_ok: Optional[bool] = None
+        self.setMinimumSize(320, 220)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -153,8 +232,8 @@ class OverlayWindow(QWidget):
         self.container = QWidget(self)
         self.container.setObjectName("hudContainer")
         self.container.setStyleSheet(
-            "#hudContainer { background: rgba(16, 20, 24, 228); border-radius: 14px; "
-            "border: 1px solid rgba(46, 204, 113, 45); }"
+            "#hudContainer { background: rgba(10, 10, 10, 235); border-radius: 8px; "
+            "border: 1px solid #353535; }"
         )
         root.addWidget(self.container)
         lay = QVBoxLayout(self.container)
@@ -167,53 +246,66 @@ class OverlayWindow(QWidget):
         self.status_dot = QLabel("●", self.container)
         self.status_dot.setStyleSheet("color: #e33; font-size: 15px;")
         self.status_dot.setToolTip("Disconnected")
+        self.status_dot.setAccessibleName("Audio status")
         header.addWidget(self.status_dot)
 
         self.title_label = QLabel("Live hints • system audio", self.container)
-        self.title_label.setStyleSheet("color: #9fb3a8; font-size: 11px; font-weight: 600;")
+        self.title_label.setStyleSheet("color: #8d8d8d; font-size: 11px; font-weight: 600; font-family: \"Roboto\", \"Segoe UI\", sans-serif;")
+        self.title_label.setAccessibleName("HUD title")
         header.addWidget(self.title_label, 1)
 
         self.stealth_pill = QLabel("STEALTH ?", self.container)
         self.stealth_pill.setStyleSheet(
-            "color: #f39c12; font-size: 10px; font-weight: bold; background: rgba(243,156,18,18);"
-            "border: 1px solid rgba(243,156,18,40); border-radius: 8px; padding: 2px 8px;"
+            "color: #ffb454; font-size: 10px; font-weight: bold; background: rgba(255,180,84,12);"
+            "border: 1px solid #353535; border-radius: 8px; padding: 2px 8px; font-family: \"Roboto Mono\", \"Segoe UI\", Consolas, monospace;"
         )
         self.stealth_pill.setToolTip("Capture-exclusion status (screenshot / screenshare protection).")
+        self.stealth_pill.setAccessibleName("Stealth status")
         header.addWidget(self.stealth_pill)
 
-        for text, tip, slot in (
+        # NOTE: each button is connected exactly once. _on_clear_btn only emits
+        # signal_clear (which is wired to clear_text) — no double-clear.
+        header_buttons = (
             ("⏸", "Pause/Resume (Ctrl+Alt+P)", self.signal_pause_toggle.emit),
             ("🗑", "Clear (Ctrl+Alt+C)", self._on_clear_btn),
             ("⧉", "Click-through (Ctrl+Alt+T)", self.signal_clickthrough_toggle.emit),
-            ("—", "Hide (Ctrl+Alt+H)", self.hide),
+            ("—", "Hide (Ctrl+Alt+H)", self.signal_hide_toggle.emit),
             ("✕", "Quit (Ctrl+Alt+Q)", self._on_quit_btn),
-        ):
+        )
+        self._header_buttons: list[QPushButton] = []
+        for text, tip, slot in header_buttons:
             b = QPushButton(text, self.container)
             b.setFixedSize(30, 24)
             b.setToolTip(tip)
+            b.setAccessibleName(tip)
             b.setStyleSheet(
-                "QPushButton { background: rgba(255,255,255,10); color: #ddd; border: none; "
-                "border-radius: 6px; font-size: 12px; }"
-                "QPushButton:hover { background: rgba(46,204,113,35); color: #fff; }"
+                "QPushButton { background: #262626; color: #d9d9d9; border: 1px solid #353535; "
+                "border-radius: 4px; font-size: 12px; font-family: \"Roboto\", \"Segoe UI\", sans-serif; }"
+                "QPushButton:hover { background: #262626; color: #ffffff; border: 1px solid #27f795; }"
+                "QPushButton:pressed { background: #151515; color: #ffffff; border: 1px solid #27f795; }"
             )
             b.setFocusPolicy(Qt.NoFocus)
             b.clicked.connect(slot)
             header.addWidget(b)
+            self._header_buttons.append(b)
         lay.addLayout(header)
 
         # divider
         div = QLabel("", self.container)
         div.setFixedHeight(1)
-        div.setStyleSheet("background: rgba(255,255,255,10); border-radius: 1px;")
+        div.setStyleSheet("background: #353535; border-radius: 1px;")
         lay.addWidget(div)
 
         self.viewer = QTextBrowser(self.container)
         self.viewer.setOpenExternalLinks(False)
+        self.viewer.setAccessibleName("Live hints viewer")
+        self.viewer.setAccessibleDescription("Streaming text hints from system audio. Scroll while reading.")
+        self.viewer.setFocusPolicy(Qt.StrongFocus)
         self.viewer.setStyleSheet(
-            "QTextBrowser { background: transparent; border: none; color: #f2f2f2; "
-            "selection-background-color: rgba(46,204,113,60); }"
+            "QTextBrowser { background: transparent; border: none; color: #d9d9d9; "
+            "selection-background-color: rgba(39,247,149,60); font-family: \"Roboto\", \"Segoe UI\", sans-serif; }"
             "QScrollBar:vertical { background: transparent; width: 8px; }"
-            "QScrollBar::handle:vertical { background: rgba(255,255,255,25); border-radius: 4px; min-height: 30px; }"
+            "QScrollBar::handle:vertical { background: #353535; border-radius: 4px; min-height: 30px; }"
             "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
         )
         self.viewer.setPlaceholderText("Waiting for system audio… play a meeting / video to begin.")
@@ -224,15 +316,16 @@ class OverlayWindow(QWidget):
             "Ctrl+Alt+H hide • C clear • P pause • T click-through • Q quit",
             self.container,
         )
-        self.hint_label.setStyleSheet("color: #5f6f66; font-size: 10px;")
+        self.hint_label.setStyleSheet("color: #8d8d8d; font-size: 10px; font-family: \"Roboto Mono\", \"Segoe UI\", Consolas, monospace;")
         bottom.addWidget(self.hint_label, 1)
         self.copy_btn = QPushButton("Copy", self.container)
         self.copy_btn.setFixedSize(58, 22)
         self.copy_btn.setToolTip("Copy all text to clipboard")
+        self.copy_btn.setAccessibleName("Copy all text")
         self.copy_btn.setStyleSheet(
-            "QPushButton { background: rgba(255,255,255,8); color: #9fb3a8; border: 1px solid rgba(255,255,255,12);"
-            "border-radius: 6px; font-size: 10px; }"
-            "QPushButton:hover { background: rgba(46,204,113,30); color: #fff; }"
+            "QPushButton { background: transparent; color: #8d8d8d; border: 1px solid #353535;"
+            "border-radius: 4px; font-size: 10px; font-family: \"Roboto\", \"Segoe UI\", sans-serif; }"
+            "QPushButton:hover { background: #151515; color: #d9d9d9; border: 1px solid #27f795; }"
         )
         self.copy_btn.setFocusPolicy(Qt.NoFocus)
         self.copy_btn.clicked.connect(self._on_copy)
@@ -264,43 +357,84 @@ class OverlayWindow(QWidget):
 
     # -- stealth ------------------------------------------------------
     def _ensure_exclusion(self) -> bool:
+        try:
+            self._excl_pending = False
+        except Exception:
+            pass
+        if sys.platform != "win32":
+            try:
+                self._update_stealth_pill(None)
+            except Exception:
+                pass
+            return False
         ok = apply_capture_exclusion(self)
         try:
             verified = get_capture_exclusion_status(self)
         except Exception:
             verified = ok
         final = bool(ok and verified) if sys.platform == "win32" else bool(ok)
-        # On non-Windows there is no affinity API — report unknown.
-        if sys.platform != "win32":
-            self._update_stealth_pill(None)
-            return False
-        self._update_stealth_pill(final)
+        try:
+            self._update_stealth_pill(final)
+        except Exception:
+            pass
         if not final:
             log.warning("Capture exclusion NOT active (screenshots may include HUD).")
+        try:
+            self._excl_initial_done = True
+        except Exception:
+            pass
         return final
 
-    def _update_stealth_pill(self, ok: Optional[bool]) -> None:
-        self._stealth_ok = ok
+    def _schedule_exclusion(self) -> None:
         try:
+            if getattr(self, "_excl_pending", False):
+                return
+            self._excl_pending = True
+            from PySide6.QtCore import QTimer
+
+            QTimer.singleShot(100, self._ensure_exclusion_single_shot)
+        except Exception:
+            try:
+                self._excl_pending = False
+            except Exception:
+                pass
+
+    def _ensure_exclusion_single_shot(self) -> None:
+        try:
+            self._ensure_exclusion()
+        except Exception:
+            try:
+                self._excl_pending = False
+            except Exception:
+                pass
+
+    def _update_stealth_pill(self, ok: Optional[bool]) -> None:
+        try:
+            self._stealth_ok = ok
+        except Exception:
+            pass
+        try:
+            if not hasattr(self, "stealth_pill"):
+                return
             if ok is True:
                 self.stealth_pill.setText("STEALTH ON")
                 self.stealth_pill.setStyleSheet(
-                    "color: #2ecc71; font-size: 10px; font-weight: bold; background: rgba(46,204,113,18);"
-                    "border: 1px solid rgba(46,204,113,45); border-radius: 8px; padding: 2px 8px;"
+                    "color: #27f795; font-size: 10px; font-weight: bold; background: rgba(39,247,149,12);"
+                    "border: 1px solid #353535; border-radius: 8px; padding: 2px 8px; font-family: \"Roboto Mono\", \"Segoe UI\", Consolas, monospace;"
                 )
                 self.stealth_pill.setToolTip("Hidden from screenshots & screenshare (WDA_EXCLUDEFROMCAPTURE). Not in Alt+Tab.")
             elif ok is False:
                 self.stealth_pill.setText("STEALTH OFF")
                 self.stealth_pill.setStyleSheet(
                     "color: #ff6b6b; font-size: 10px; font-weight: bold; background: rgba(255,80,80,15);"
-                    "border: 1px solid rgba(255,80,80,45); border-radius: 8px; padding: 2px 8px;"
+                    "border: 1px solid #353535; border-radius: 8px; padding: 2px 8px; font-family: \"Roboto Mono\", \"Segoe UI\", Consolas, monospace;"
                 )
                 self.stealth_pill.setToolTip("Capture exclusion FAILED — HUD may appear in screenshots. Requires Win10 2004+.")
             else:
                 self.stealth_pill.setText("STEALTH ?")
                 self.stealth_pill.setStyleSheet(
-                    "color: #f39c12; font-size: 10px; font-weight: bold; background: rgba(243,156,18,18);"
-                    "border: 1px solid rgba(243,156,18,40); border-radius: 8px; padding: 2px 8px;"
+                    "color: #ffb454; font-size: 10px; font-weight: bold; background: rgba(255,180,84,12);"
+                    "border: 1px solid #353535; border-radius: 8px; padding: 2px 8px; font-family: \"Roboto Mono\", \"Segoe UI\", Consolas, monospace;"
                 )
                 self.stealth_pill.setToolTip("Capture-exclusion status unknown (non-Windows or not yet verified).")
         except Exception:
@@ -311,51 +445,103 @@ class OverlayWindow(QWidget):
 
     # -- public API ---------------------------------------------------
     def showEvent(self, event) -> None:  # type: ignore[override]
-        super().showEvent(event)
-        # affinity must be applied after native handle exists; retry a few times
-        QTimer.singleShot(100, self._ensure_exclusion)
-        QTimer.singleShot(800, self._ensure_exclusion)
+        try:
+            super().showEvent(event)
+        except Exception:
+            pass
+        self._schedule_exclusion()
+        try:
+            from PySide6.QtCore import QTimer
+
+            # second retry catches late native-handle creation
+            QTimer.singleShot(800, self._ensure_exclusion_single_shot)
+        except Exception:
+            pass
 
     def changeEvent(self, event) -> None:  # type: ignore[override]
         try:
             super().changeEvent(event)
         except Exception:
             pass
-        try:
-            QTimer.singleShot(150, self._ensure_exclusion)
-        except Exception:
-            pass
+        self._schedule_exclusion()
 
-    @Slot(str)
-    def append_text_delta(self, text: str) -> None:
+    def _is_at_bottom(self) -> bool:
         try:
-            rendered = _render_markdown_lite(text)
             sb = self.viewer.verticalScrollBar()
-            at_bottom = sb.value() >= sb.maximum() - 4
-            self.viewer.insertHtml(rendered)
-            # keep cursor at end so subsequent inserts append
+            return sb.value() >= sb.maximum() - 4
+        except Exception:
+            return True
+
+    def _trim_history(self) -> None:
+        """Cap the document at MAX_HISTORY_CHARS to prevent a memory leak."""
+        try:
+            doc = self.viewer.document()
+            total = int(doc.characterCount())
+            max_chars = int(self.MAX_HISTORY_CHARS)
+            if total <= max_chars:
+                return
+            excess = total - max_chars
+            cursor = QTextCursor(doc)
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
+            remaining = excess
+            while remaining > 0:
+                step = min(remaining, 2000)
+                cursor.movePosition(
+                    QTextCursor.MoveOperation.NextCharacter,
+                    QTextCursor.MoveMode.KeepAnchor,
+                    step,
+                )
+                remaining -= step
+            cursor.removeSelectedText()
+        except Exception as e:
             try:
-                cursor = self.viewer.textCursor()
-                cursor.movePosition(QTextCursor.MoveMode.End)
-                self.viewer.setTextCursor(cursor)
+                log.debug("trim history failed: %s", e)
             except Exception:
                 pass
+
+    def append_text_delta(self, text: str) -> None:
+        try:
+            if text is None:
+                return
+            rendered = _render_markdown_lite(str(text))
+            at_bottom = self._is_at_bottom()
+            self.viewer.insertHtml(rendered)
+            self._trim_history()
+            # only pin cursor to the end when the user was already at the bottom;
+            # otherwise preserve their reading position (no autoscroll hijack).
             if at_bottom:
-                sb.setValue(sb.maximum())
+                try:
+                    cursor = self.viewer.textCursor()
+                    try:
+                        cursor.movePosition(QTextCursor.MoveOperation.End)
+                    except Exception:
+                        cursor.movePosition(QTextCursor.MoveMode.End)
+                    self.viewer.setTextCursor(cursor)
+                except Exception:
+                    pass
+                try:
+                    sb = self.viewer.verticalScrollBar()
+                    sb.setValue(sb.maximum())
+                except Exception:
+                    pass
             self._maybe_autoresize()
         except Exception as e:
             log.debug("append failed: %s", e)
 
     def append_status_line(self, text: str) -> None:
         try:
-            safe = html.escape(text)
-            sb = self.viewer.verticalScrollBar()
-            at_bottom = sb.value() >= sb.maximum() - 4
+            safe = html.escape(str(text))
+            at_bottom = self._is_at_bottom()
             self.viewer.insertHtml(
-                f'<div style="color:#7ef0c1;font-size:11px;margin:4px 0;">{safe}</div>'
+                f'<div style="color:#27f795;font-size:11px;margin:4px 0;">{safe}</div>'
             )
+            self._trim_history()
             if at_bottom:
-                sb.setValue(sb.maximum())
+                try:
+                    sb = self.viewer.verticalScrollBar()
+                    sb.setValue(sb.maximum())
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -367,25 +553,33 @@ class OverlayWindow(QWidget):
         except Exception:
             pass
 
-    @Slot(str)
     def set_status(self, state: str) -> None:
-        colors = {"active": ("#2ecc71", "Active — streaming system audio"),
-                  "paused": ("#f39c12", "Paused — context saver on"),
-                  "disconnected": ("#e33", "Disconnected"),
-                  "connecting": ("#f39c12", "Connecting…")}
-        color, tip = colors.get(state, colors["disconnected"])
         try:
-            self.status_dot.setStyleSheet(f"color: {color}; font-size: 15px;")
-            self.status_dot.setToolTip(tip)
-            self.title_label.setText(f"Live hints • {tip}")
-            self._paused = (state == "paused")
+            s = str(state or "disconnected").lower()
+            colors = {
+                "active": ("#27f795", "Active — streaming system audio"),
+                "paused": ("#ffb454", "Paused — context saver on"),
+                "disconnected": ("#e33", "Disconnected"),
+                "connecting": ("#ffb454", "Connecting…"),
+            }
+            color, tip = colors.get(s, colors["disconnected"])
             try:
-                glow = {"active": "rgba(46,204,113,55)", "paused": "rgba(243,156,18,55)",
-                        "connecting": "rgba(243,156,18,55)"}.get(state, "rgba(255,255,255,18)")
-                self.container.setStyleSheet(
-                    f"#hudContainer {{ background: rgba(16, 20, 24, 228); border-radius: 14px; "
-                    f"border: 1px solid {glow}; }}"
-                )
+                self.status_dot.setStyleSheet(f"color: {color}; font-size: 15px;")
+                self.status_dot.setToolTip(tip)
+                self.title_label.setText(f"Live hints • {tip}")
+                self._paused = (s == "paused")
+                try:
+                    tint = {
+                        "active": "#27f795",
+                        "paused": "#ffb454",
+                        "connecting": "#ffb454",
+                    }.get(s, "#353535")
+                    self.container.setStyleSheet(
+                        f"#hudContainer {{ background: rgba(10, 10, 10, 235); border-radius: 8px; "
+                        f"border: 1px solid {tint}; }}"
+                    )
+                except Exception:
+                    pass
             except Exception:
                 pass
         except Exception:
@@ -405,7 +599,6 @@ class OverlayWindow(QWidget):
         except Exception:
             pass
 
-    @Slot(float)
     def set_hud_opacity(self, value: float) -> None:
         try:
             self.setWindowOpacity(max(0.3, min(1.0, float(value))))
@@ -426,7 +619,6 @@ class OverlayWindow(QWidget):
             return
         try:
             doc_h = float(self.viewer.document().size().height())
-            # header + hint + margins + padding
             extra = 150
             new_h = int(doc_h + extra)
             new_h = max(340, new_h)
@@ -448,9 +640,12 @@ class OverlayWindow(QWidget):
     def set_click_through(self, enabled: bool) -> None:
         try:
             self._click_through = bool(enabled)
+            was_visible = self.isVisible()
             self.setWindowFlag(Qt.WindowTransparentForInput, self._click_through)
-            self.show()  # flag change requires re-show
-            QTimer.singleShot(100, self._ensure_exclusion)
+            # flag change requires re-show, but never un-hide a hidden HUD
+            if was_visible:
+                self.show()
+            self._schedule_exclusion()
         except Exception as e:
             log.debug("click-through toggle failed: %s", e)
 
@@ -461,14 +656,21 @@ class OverlayWindow(QWidget):
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         try:
             if event.button() == Qt.LeftButton:
-                self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                try:
+                    self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                except Exception:
+                    # older PySide: globalPos()
+                    self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
         except Exception:
             self._drag_pos = None
 
     def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
         try:
             if self._drag_pos is not None and event.buttons() & Qt.LeftButton:
-                self.move(event.globalPosition().toPoint() - self._drag_pos)
+                try:
+                    self.move(event.globalPosition().toPoint() - self._drag_pos)
+                except Exception:
+                    self.move(event.globalPos() - self._drag_pos)
         except Exception:
             pass
 
@@ -476,23 +678,40 @@ class OverlayWindow(QWidget):
         self._drag_pos = None
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
-        """Closing the HUD kills the entire program (no orphan audio/network threads)."""
+        """Graceful shutdown: stop hotkeys and quit the app loop (no os._exit).
+
+        main.py listens to signal_quit to stop audio/network threads; we notify
+        it first, and only fall back to app.quit() when nobody else handles it.
+        """
         try:
             self.stop_hotkeys()
         except Exception:
             pass
         try:
-            app = QApplication.instance()
-            if app is not None:
-                app.quit()
+            notified = False
+            try:
+                notified = bool(self.isSignalConnected(self.signal_quit))  # type: ignore[arg-type]
+            except Exception:
+                notified = False
+            if notified:
+                try:
+                    self.signal_quit.emit()
+                except Exception:
+                    pass
+            else:
+                app = QApplication.instance()
+                if app is not None:
+                    try:
+                        app.quit()
+                    except Exception:
+                        pass
         except Exception:
             pass
         try:
-            super().closeEvent(event)
+            if event is not None:
+                event.accept()
         except Exception:
             pass
-        finally:
-            os._exit(0)
 
     # -- internal slots ------------------------------------------------
     def _toggle_visibility(self) -> None:
@@ -501,7 +720,7 @@ class OverlayWindow(QWidget):
                 self.hide()
             else:
                 self.show()
-                QTimer.singleShot(120, self._ensure_exclusion)
+                self._schedule_exclusion()
         except Exception:
             pass
 
@@ -512,8 +731,17 @@ class OverlayWindow(QWidget):
             pass
 
     def _on_clear_btn(self) -> None:
-        self.clear_text()
-        self.signal_clear.emit()
+        # single path: signal_clear -> clear_text (no double-clear)
+        try:
+            self.signal_clear.emit()
+        except Exception:
+            pass
+
+    def _restore_copy_label(self) -> None:
+        try:
+            self.copy_btn.setText("Copy")
+        except Exception:
+            pass
 
     def _on_copy(self) -> None:
         try:
@@ -521,12 +749,20 @@ class OverlayWindow(QWidget):
             if cb is not None:
                 cb.setText(self.viewer.toPlainText())
                 self.copy_btn.setText("Copied!")
-                QTimer.singleShot(1200, lambda: self.copy_btn.setText("Copy"))
+                try:
+                    from PySide6.QtCore import QTimer
+
+                    QTimer.singleShot(1200, self._restore_copy_label)
+                except Exception:
+                    pass
         except Exception:
             pass
 
     def _on_quit_btn(self) -> None:
-        self.signal_quit.emit()
+        try:
+            self.signal_quit.emit()
+        except Exception:
+            pass
 
     # -- global hotkeys ------------------------------------------------
     def start_hotkeys(self) -> None:
@@ -563,10 +799,11 @@ class OverlayWindow(QWidget):
                 pass
 
         def _do_quit():
+            # graceful: owner (main.py) stops audio/network then quits.
             try:
                 self.signal_quit.emit()
-            finally:
-                os._exit(0)
+            except Exception:
+                pass
 
         try:
             self._hotkeys = keyboard.GlobalHotKeys({
@@ -585,7 +822,9 @@ class OverlayWindow(QWidget):
     def stop_hotkeys(self) -> None:
         try:
             if self._hotkeys is not None:
-                self._hotkeys.stop()
-        except Exception:
-            pass
-        self._hotkeys = None
+                try:
+                    self._hotkeys.stop()
+                except Exception:
+                    pass
+        finally:
+            self._hotkeys = None

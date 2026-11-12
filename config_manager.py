@@ -1,12 +1,36 @@
-"""Thread-safe JSON config manager for InterviewCopilot."""
+"""Thread-safe JSON config manager for InterviewCopilot.
+
+Stores user settings in ``config.json`` next to the script (or next to the
+frozen executable). The file contains a live API key: it is listed in
+``.gitignore`` and must never be committed (redacted in logs/diagnostics).
+
+Public API is exported via ``__all__``. All public functions are safe to
+call from multiple threads and never raise on bad input except
+:func:`save_config`, which re-raises :class:`OSError` /
+:class:`TypeError` / :class:`ValueError` after cleaning up its temp file.
+"""
 
 from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import threading
-from typing import Any, Dict
+from typing import Any
+
+__all__ = [
+    "DEFAULT_CONFIG",
+    "DEFAULT_SYSTEM_INSTRUCTION",
+    "OLD_DEFAULT_SYSTEM_INSTRUCTION",
+    "PREV_DEFAULT_SYSTEM_INSTRUCTION_V1",
+    "get_config_path",
+    "load_config",
+    "reset_to_defaults",
+    "save_config",
+    "update_config",
+    "validate_config",
+]
 
 OLD_DEFAULT_SYSTEM_INSTRUCTION = (
     "You are an elite, invisible real-time technical interview copilot.\n"
@@ -67,13 +91,13 @@ DEFAULT_SYSTEM_INSTRUCTION = (
     "7. TEXT ONLY: Your reply is shown as text. Never request or produce audio."
 )
 
-DEFAULT_CONFIG: Dict[str, Any] = {
+DEFAULT_CONFIG: dict[str, Any] = {
     "api_key": "",
     "audio_mode": "system",  # "system" = computer sound only (default), "dual" = mic + system
     "mic_enabled": False,
     "selected_mic_index": None,
     "selected_loopback_name": "",
-    "vad_threshold_db": 300,
+    "vad_threshold_db": 120,
     "save_transcript_locally": True,
     "font_size": 14,
     "hud_opacity": 0.85,
@@ -81,8 +105,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "fallback_model": "gemini-3.1-flash-live-preview",
     "ultimate_fallback_model": "gemini-2.5-flash-native-audio-preview-12-2025",
     "summarizer_model": "gemini-3.5-flash-lite",
-    "thinking_level": "HIGH",
-    "difficulty_level": "MEDIUM",  # user-facing difficulty: EASY/MEDIUM/HARD/EXPERT -> prompt mapping
+    "thinking_level": "MINIMAL",
+    "difficulty_level": "EASY",  # user-facing difficulty: EASY/MEDIUM/HARD/EXPERT -> prompt mapping
     "target_role": "",
     "target_company": "",
     "system_instruction": DEFAULT_SYSTEM_INSTRUCTION,
@@ -98,11 +122,25 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
 _lock = threading.RLock()
 
+# String keys for which an empty/whitespace value is invalid and must
+# fall back to the default (an empty model name would fail downstream).
+_EMPTY_FALLBACK_KEYS = frozenset({
+    "model",
+    "fallback_model",
+    "ultimate_fallback_model",
+    "summarizer_model",
+    "system_instruction",
+})
+
+_FALSE_STRINGS = frozenset({"", "false", "0", "no", "off", "n", "f"})
+_TRUE_STRINGS = frozenset({"true", "1", "yes", "on", "y", "t"})
+
 
 def get_config_path() -> str:
-    """Return writable config path (exe dir when frozen, else script dir)."""
+    """Return the writable config path (exe dir when frozen, else script dir)."""
     try:
         import sys as _sys
+
         if getattr(_sys, "frozen", False):
             base = os.path.dirname(os.path.abspath(_sys.executable))
         else:
@@ -117,40 +155,89 @@ def get_config_path() -> str:
     return os.path.join(base, "config.json")
 
 
-def _merged_with_defaults(data: Dict[str, Any]) -> Dict[str, Any]:
+def _coerce_int(value: Any, default: int, low: int, high: int) -> int:
+    """Coerce *value* to an int in ``[low, high]``; bad input returns *default*."""
+    if isinstance(value, bool):
+        return default
+    try:
+        n = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return max(low, min(high, n))
+
+
+def _coerce_float(value: Any, default: float, low: float, high: float) -> float:
+    """Coerce *value* to a finite float in ``[low, high]``."""
+    if isinstance(value, bool):
+        return default
+    try:
+        n = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if not math.isfinite(n):
+        return default
+    return max(low, min(high, n))
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    """Coerce *value* to a bool, understanding common string spellings."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in _FALSE_STRINGS:
+            return False
+        if s in _TRUE_STRINGS:
+            return True
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return bool(value)
+
+
+def _merged_with_defaults(data: Any) -> dict[str, Any]:
+    """Merge *data* over a deep copy of :data:`DEFAULT_CONFIG`."""
     merged = copy.deepcopy(DEFAULT_CONFIG)
-    for k, v in (data or {}).items():
+    if not isinstance(data, dict):
+        return merged
+    for k, v in data.items():
+        if not isinstance(k, str):
+            continue
+        if k.startswith("_"):
+            continue  # transient/private state (e.g. _knowledge_summary) is never persisted
         merged[k] = v
     return merged
 
 
-def validate_config(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Clamp / coerce values into safe ranges. Returns validated copy."""
+def validate_config(data: dict[str, Any]) -> dict[str, Any]:
+    """Clamp / coerce values into safe ranges. Returns a validated copy.
+
+    Never raises on bad input: non-dict input is treated as empty, bools are
+    not accepted as ints/floats, NaN/Inf fall back to defaults, and model
+    fields with empty values fall back to their defaults. Unknown public
+    keys are preserved for forward compatibility; ``_``-prefixed keys are
+    stripped.
+    """
     cfg = _merged_with_defaults(data)
 
-    try:
-        cfg["vad_threshold_db"] = int(cfg.get("vad_threshold_db", 300))
-    except (TypeError, ValueError):
-        cfg["vad_threshold_db"] = 300
-    cfg["vad_threshold_db"] = max(50, min(2000, cfg["vad_threshold_db"]))
+    cfg["vad_threshold_db"] = _coerce_int(cfg.get("vad_threshold_db", 300), 300, 50, 2000)
+    cfg["font_size"] = _coerce_int(cfg.get("font_size", 14), 14, 8, 28)
+    cfg["hud_opacity"] = _coerce_float(cfg.get("hud_opacity", 0.85), 0.85, 0.3, 1.0)
 
-    try:
-        cfg["font_size"] = int(cfg.get("font_size", 14))
-    except (TypeError, ValueError):
-        cfg["font_size"] = 14
-    cfg["font_size"] = max(8, min(28, cfg["font_size"]))
-
-    try:
-        cfg["hud_opacity"] = float(cfg.get("hud_opacity", 0.85))
-    except (TypeError, ValueError):
-        cfg["hud_opacity"] = 0.85
-    cfg["hud_opacity"] = max(0.3, min(1.0, cfg["hud_opacity"]))
-
-    if cfg.get("selected_mic_index") is not None:
+    mic = cfg.get("selected_mic_index")
+    if mic is None:
+        cfg["selected_mic_index"] = None
+    elif isinstance(mic, bool):
+        cfg["selected_mic_index"] = None
+    else:
         try:
-            cfg["selected_mic_index"] = int(cfg["selected_mic_index"])
-        except (TypeError, ValueError):
+            mic_int = int(mic)  # type: ignore[arg-type]
+        except (TypeError, ValueError, OverflowError):
             cfg["selected_mic_index"] = None
+        else:
+            cfg["selected_mic_index"] = mic_int if mic_int >= 0 else None
 
     # audio mode: system-only (computer sound) is the default; dual adds mic
     try:
@@ -163,19 +250,19 @@ def validate_config(data: Dict[str, Any]) -> Dict[str, Any]:
         mode = "system"
     cfg["audio_mode"] = mode
     # mic_enabled is derived strictly from audio_mode (system = computer only)
-    if mode == "system":
-        cfg["mic_enabled"] = False
-    else:
-        cfg["mic_enabled"] = True
+    cfg["mic_enabled"] = mode != "system"
 
     for key in ("api_key", "selected_loopback_name", "model",
                 "fallback_model", "ultimate_fallback_model",
                 "summarizer_model", "thinking_level", "difficulty_level",
                 "target_role", "target_company", "system_instruction"):
-        if cfg.get(key) is None:
+        value = cfg.get(key)
+        if value is None:
+            cfg[key] = DEFAULT_CONFIG[key]
+        elif key in _EMPTY_FALLBACK_KEYS and isinstance(value, str) and not value.strip():
             cfg[key] = DEFAULT_CONFIG[key]
         else:
-            cfg[key] = str(cfg[key])
+            cfg[key] = str(value)
     # migrate retired default prompts to the current one.
     # Custom user prompts are never touched.
     try:
@@ -199,8 +286,6 @@ def validate_config(data: Dict[str, Any]) -> Dict[str, Any]:
     # normalize difficulty (user-facing)
     try:
         diff = str(cfg.get("difficulty_level", "MEDIUM") or "MEDIUM").strip().upper()
-        if diff in ("EASY", "BEGINNER", "MINIMAL", "LOW"):
-            diff = "EASY" if diff in ("EASY", "BEGINNER") else diff
         aliases = {"BEGINNER": "EASY", "NORMAL": "MEDIUM", "HARD": "HARD",
                    "EXPERT": "EXPERT", "MINIMAL": "EASY", "LOW": "EASY",
                    "MEDIUM": "MEDIUM", "HIGH": "HARD", "EXTENDED": "EXPERT",
@@ -212,64 +297,80 @@ def validate_config(data: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         cfg["difficulty_level"] = "MEDIUM"
 
-    cfg["save_transcript_locally"] = bool(cfg.get("save_transcript_locally", True))
-
-    cfg["enable_knowledge"] = bool(cfg.get("enable_knowledge", False))
-    cfg["enable_web_search"] = bool(cfg.get("enable_web_search", False))
-    cfg["hud_auto_resize"] = bool(cfg.get("hud_auto_resize", True))
-    cfg["stealth_hide_from_capture"] = bool(cfg.get("stealth_hide_from_capture", True))
-    cfg["selftest_hello"] = bool(cfg.get("selftest_hello", True))
+    cfg["save_transcript_locally"] = _coerce_bool(cfg.get("save_transcript_locally", True), True)
+    cfg["enable_knowledge"] = _coerce_bool(cfg.get("enable_knowledge", False), False)
+    cfg["enable_web_search"] = _coerce_bool(cfg.get("enable_web_search", False), False)
+    cfg["hud_auto_resize"] = _coerce_bool(cfg.get("hud_auto_resize", True), True)
+    cfg["stealth_hide_from_capture"] = _coerce_bool(
+        cfg.get("stealth_hide_from_capture", True), True
+    )
+    cfg["selftest_hello"] = _coerce_bool(cfg.get("selftest_hello", True), True)
 
     raw_paths = cfg.get("knowledge_paths", [])
-    if isinstance(raw_paths, str):
-        raw_paths = [raw_paths]
+    if isinstance(raw_paths, (str, os.PathLike)):
+        raw_paths = [str(raw_paths)]
     if not isinstance(raw_paths, (list, tuple)):
         raw_paths = []
-    cfg["knowledge_paths"] = [str(p) for p in raw_paths if str(p).strip()]
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for p in raw_paths:
+        if p is None:
+            continue
+        s = str(p).strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        cleaned.append(s)
+    cfg["knowledge_paths"] = cleaned
 
-    try:
-        cfg["knowledge_max_chars"] = int(cfg.get("knowledge_max_chars", 12000))
-    except (TypeError, ValueError):
-        cfg["knowledge_max_chars"] = 12000
-    cfg["knowledge_max_chars"] = max(1000, min(60000, cfg["knowledge_max_chars"]))
-
-    try:
-        cfg["web_max_results"] = int(cfg.get("web_max_results", 5))
-    except (TypeError, ValueError):
-        cfg["web_max_results"] = 5
-    cfg["web_max_results"] = max(1, min(10, cfg["web_max_results"]))
+    cfg["knowledge_max_chars"] = _coerce_int(
+        cfg.get("knowledge_max_chars", 12000), 12000, 1000, 60000
+    )
+    cfg["web_max_results"] = _coerce_int(cfg.get("web_max_results", 5), 5, 1, 10)
 
     return cfg
 
 
-def load_config(path: str | None = None) -> Dict[str, Any]:
+def load_config(path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
     """Load config from disk, merging defaults on missing/corrupt file."""
     with _lock:
-        cfg_path = path or get_config_path()
+        cfg_path = str(path) if path is not None else get_config_path()
         if not os.path.exists(cfg_path):
-            return copy.deepcopy(DEFAULT_CONFIG)
+            return validate_config({})
         try:
             with open(cfg_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if not isinstance(data, dict):
-                return copy.deepcopy(DEFAULT_CONFIG)
+                return validate_config({})
             return validate_config(data)
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            return copy.deepcopy(DEFAULT_CONFIG)
+            return validate_config({})
 
 
-def save_config(data: Dict[str, Any], path: str | None = None) -> str:
-    """Validate and atomically write config. Returns path written."""
+def save_config(data: dict[str, Any], path: str | os.PathLike[str] | None = None) -> str:
+    """Validate and atomically write config. Returns the path written.
+
+    Writes to a sibling ``.tmp`` file, fsyncs, then ``os.replace`` (atomic
+    on Windows and POSIX). On failure the temp file is removed and the
+    exception re-raised. The file may contain an API key: permissions are
+    restricted best-effort (``0o600`` where supported).
+    """
     with _lock:
-        cfg_path = path or get_config_path()
+        cfg_path = str(path) if path is not None else get_config_path()
         validated = validate_config(data)
         tmp_path = cfg_path + ".tmp"
         try:
             os.makedirs(os.path.dirname(cfg_path) or ".", exist_ok=True)
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(validated, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp_path, cfg_path)
-        except OSError:
+            try:
+                os.chmod(cfg_path, 0o600)
+            except (OSError, NotImplementedError):
+                pass
+        except (OSError, TypeError, ValueError):
             try:
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
@@ -279,17 +380,21 @@ def save_config(data: Dict[str, Any], path: str | None = None) -> str:
         return cfg_path
 
 
-def update_config(partial: Dict[str, Any], path: str | None = None) -> Dict[str, Any]:
-    """Merge partial dict into stored config and persist."""
+def update_config(
+    partial: dict[str, Any], path: str | os.PathLike[str] | None = None
+) -> dict[str, Any]:
+    """Merge a partial dict into the stored config, validate, and persist."""
     with _lock:
         current = load_config(path)
-        current.update(partial or {})
+        if isinstance(partial, dict):
+            current.update(partial)
         validated = validate_config(current)
         save_config(validated, path)
         return validated
 
 
-def reset_to_defaults(path: str | None = None) -> Dict[str, Any]:
+def reset_to_defaults(path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
+    """Overwrite config on disk with validated defaults; returns the defaults."""
     with _lock:
         save_config(copy.deepcopy(DEFAULT_CONFIG), path)
-        return copy.deepcopy(DEFAULT_CONFIG)
+        return validate_config({})

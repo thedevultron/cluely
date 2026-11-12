@@ -8,3 +8,7 @@ pynput>=1.7.6
 httpx>=0.27
 pypdf>=4.0
 pyinstaller>=6.0
+
+# --- Dev / test only (install separately; NOT required at runtime) ---
+# pytest>=7
+# Install with:  python -m pip install pytest

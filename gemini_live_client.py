@@ -8,6 +8,15 @@ from typing import Awaitable, Callable, List, Optional
 
 log = logging.getLogger("cluely.gemini")
 
+# Latency tuning: endpointing delay (prefix padding + silence wait).
+# PREFIX_MS: audio kept before detected speech start.
+# SILENCE_MS: silence required to declare end-of-turn (endpointing wait).
+PREFIX_MS = 80
+SILENCE_MS = 150
+MAX_OUTPUT_TOKENS = 160
+MARKER_THROTTLE_S = 0.5
+AUDIO_BACKLOG_FLUSH_THRESHOLD = 8
+
 try:
     from google import genai
     from google.genai import types
@@ -64,8 +73,8 @@ def _build_live_config(system_instruction: str, thinking_level: str = "HIGH", mo
                 except Exception:
                     pass
                 try:
-                    _aad_kwargs["prefix_padding_ms"] = 200
-                    _aad_kwargs["silence_duration_ms"] = 350
+                    _aad_kwargs["prefix_padding_ms"] = PREFIX_MS
+                    _aad_kwargs["silence_duration_ms"] = SILENCE_MS
                 except Exception:
                     pass
                 _ric_kwargs: dict = {
@@ -81,9 +90,23 @@ def _build_live_config(system_instruction: str, thinking_level: str = "HIGH", mo
             log.debug("realtime_input_config unsupported by SDK: %s", e)
     # Cap reply length: AUDIO answers stream in realtime, so long answers =
     # late answers. Short cap keeps replies fast and on-point.
+    # Low temperature/top_p: faster first token, short deterministic replies.
     try:
         if types is not None and hasattr(types, "GenerationConfig"):
-            kwargs["generation_config"] = types.GenerationConfig(max_output_tokens=320)  # type: ignore[union-attr]
+            try:
+                kwargs["generation_config"] = types.GenerationConfig(  # type: ignore[union-attr]
+                    max_output_tokens=MAX_OUTPUT_TOKENS,
+                    temperature=0.2,
+                    top_p=0.9,
+                )
+            except TypeError:
+                # Older SDK tolerates only a subset of keys; try reduced forms.
+                try:
+                    kwargs["generation_config"] = types.GenerationConfig(  # type: ignore[union-attr]
+                        max_output_tokens=MAX_OUTPUT_TOKENS
+                    )
+                except Exception as e:
+                    log.debug("generation_config unsupported by SDK: %s", e)
     except Exception as e:
         log.debug("generation_config unsupported by SDK: %s", e)
     if system_instruction:
@@ -136,6 +159,28 @@ def _build_live_config(system_instruction: str, thinking_level: str = "HIGH", mo
             return {"response_modalities": ["TEXT"], "system_instruction": system_instruction}
 
 
+def _is_fatal_model_error(msg: str) -> bool:
+    """True if this connect error means the model candidate is unusable.
+
+    Fatal (try next candidate): 1007 / "not supported" / 404 / 400 etc.
+    Transient (backoff + retry same candidate): 1008 policy/overload closes.
+    1008 must never pin to a flaky fallback when the primary can recover.
+    """
+    try:
+        s = str(msg or "")
+    except Exception:
+        return False
+    if "1008" in s:
+        return False
+    low = s.lower()
+    if "1007" in s:
+        return True
+    return (
+        any(x in s for x in ("404", "NOT_FOUND", "400", "INVALID_ARGUMENT"))
+        or any(x in low for x in ("not found", "not supported", "unsupported", "must be specified"))
+    )
+
+
 class GeminiLiveClient:
     """Producer-consumer live session with auto-reconnect + model fallback."""
 
@@ -151,22 +196,55 @@ class GeminiLiveClient:
         summarizer_model: str = "gemini-3.5-flash-lite",
         enable_web_search: bool = False,
         web_max_results: int = 5,
-        selftest_hello: bool = True,
+        selftest_hello: bool = False,
         max_session_minutes: float = 10.0,
     ) -> None:
-        self.api_key = (api_key or "").strip()
-        self.model = (model or "gemini-3.8-live").strip()
-        self.system_instruction = system_instruction or ""
+        try:
+            self.api_key = str(api_key or "").strip()
+        except Exception:
+            self.api_key = ""
+        try:
+            self.model = str(model or "gemini-3.8-live").strip() or "gemini-3.8-live"
+        except Exception:
+            self.model = "gemini-3.8-live"
+        try:
+            self.system_instruction = system_instruction or ""
+        except Exception:
+            self.system_instruction = ""
         self.audio_queue = audio_queue
         self.speaker_queue = speaker_queue
-        self.fallback_models = [m for m in (fallback_models or []) if m and m not in (self.model,)]
-        self.summarizer_model = (summarizer_model or "gemini-3.5-flash-lite").strip()
+        # Normalize fallbacks: tolerate a single string (not iterable-of-chars),
+        # strip whitespace, drop blanks/duplicates and the primary model.
+        _fm = fallback_models
+        if isinstance(_fm, str):
+            _fm = [_fm]
+        _seen: set = set()
+        _clean: List[str] = []
+        try:
+            for _m in list(_fm or []):
+                try:
+                    _s = str(_m or "").strip()
+                except Exception:
+                    continue
+                if _s and _s != self.model and _s not in _seen:
+                    _seen.add(_s)
+                    _clean.append(_s)
+        except Exception:
+            _clean = []
+        self.fallback_models = _clean
+        try:
+            self.summarizer_model = str(summarizer_model or "gemini-3.5-flash-lite").strip() or "gemini-3.5-flash-lite"
+        except Exception:
+            self.summarizer_model = "gemini-3.5-flash-lite"
         self.enable_web_search = bool(enable_web_search)
         try:
             self.web_max_results = max(1, min(10, int(web_max_results)))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             self.web_max_results = 5
-        lvl = str(thinking_level or "HIGH").strip().upper()
+        try:
+            lvl = str(thinking_level or "HIGH").strip().upper()
+        except Exception:
+            lvl = "HIGH"
         if lvl in ("EXTENDED", "MAX", "ULTRA"):
             lvl = "HIGH"
         self.thinking_level = lvl if lvl in ("MINIMAL", "LOW", "MEDIUM", "HIGH") else "HIGH"
@@ -176,12 +254,18 @@ class GeminiLiveClient:
         self.last_error: str = ""
         self.selftest_hello = bool(selftest_hello)
         try:
-            self.max_session_age_s = max(120.0, float(max_session_minutes) * 60.0)
-        except (TypeError, ValueError):
+            _sess = float(max_session_minutes)
+            if _sess != _sess or _sess in (float("inf"), float("-inf")):
+                _sess = 10.0
+            self.max_session_age_s = max(120.0, min(3600.0, _sess * 60.0))
+        except (TypeError, ValueError, OverflowError):
             self.max_session_age_s = 600.0
         self._hello_done = False
         self._hello_attempts = 0
         self._hello_time: float = 0.0
+        # latency / reconnect bookkeeping (re-probe primary every 2 sessions)
+        self._session_tries = 0
+        self._last_marker_time: float = 0.0
         # -- diagnostics (console stats ticker) ---------------------------
         self.sessions_opened = 0
         self.rx_responses = 0
@@ -227,6 +311,20 @@ class GeminiLiveClient:
                 out.append(m)
         return out
 
+    def _ordered_candidates(self, probe_primary: bool = False) -> List[str]:
+        """Candidate order: prefer working model, unless re-probing primary.
+
+        probe_primary=True returns primary-first ordering (used every 2nd
+        session so a recovered primary is not permanently shadowed by a
+        flaky fallback pinned as _working_model).
+        """
+        cands = self._candidates()
+        if probe_primary:
+            return cands
+        if self._working_model and self._working_model in cands:
+            return [self._working_model] + [m for m in cands if m != self._working_model]
+        return cands
+
     async def run(
         self,
         on_text: TextCallback,
@@ -257,12 +355,19 @@ class GeminiLiveClient:
         self._stop.clear()
         backoff = 2.0
         last_reason = ""
-        # stick to working model once found
-        ordered = self._candidates()
-        if self._working_model and self._working_model in ordered:
-            ordered = [self._working_model] + [m for m in ordered if m != self._working_model]
+        # Re-probe primary every 2 sessions: never pin to a flaky fallback.
+        try:
+            self._session_tries = int(getattr(self, "_session_tries", 0) or 0)
+        except Exception:
+            self._session_tries = 0
+        ordered = self._ordered_candidates(probe_primary=(self._session_tries % 2 == 1))
 
         while not self._stop.is_set():
+            self._session_tries += 1
+            if self._session_tries % 2 == 0:
+                ordered = self._ordered_candidates(probe_primary=True)
+            else:
+                ordered = self._ordered_candidates(probe_primary=False)
             connected = False
             for candidate in ordered:
                 if self._stop.is_set():
@@ -302,14 +407,10 @@ class GeminiLiveClient:
                                      self._hello_attempts + 1)
                     except Exception:
                         pass
-                    _ml = msg.lower()
-                    _fatal = (
-                        any(s in msg for s in ("404", "NOT_FOUND", "400", "INVALID_ARGUMENT"))
-                        or any(s in _ml for s in ("not found", "not supported", "unsupported", "must be specified", "1007", "1008"))
-                    )
+                    _fatal = _is_fatal_model_error(msg)
                     if _fatal:
                         continue  # wrong model/capability -> try next candidate
-                    break  # transient -> backoff then retry same order
+                    break  # transient (e.g. 1008) -> backoff then retry same order
             if self._stop.is_set():
                 return
             if connected:
@@ -323,9 +424,7 @@ class GeminiLiveClient:
                 await self._emit(on_status, "disconnected")
                 await self._sleep_or_stop(min(backoff, 30.0))
                 backoff = min(backoff * 1.6, 30.0)
-                # refresh order to prefer working model
-                if self._working_model and self._working_model in ordered:
-                    ordered = [self._working_model] + [m for m in ordered if m != self._working_model]
+                # refresh order for next loop (re-probe logic at loop top)
 
     async def _run_session(self, model: str, on_text, on_status) -> str:
         log.info("Connecting Live model=%s thinking=%s web_search=%s", model, self.thinking_level, self.enable_web_search)
@@ -397,7 +496,9 @@ class GeminiLiveClient:
                         # yields no model text (unanswered hello -> retry next session)
                         self._hello_done = True
                         self._hello_rx_baseline = int(self.rx_chunks)
-                        await self._send_hello(session, on_text)
+                        # Non-blocking: never await hello before _session_loop,
+                        # so audio streaming starts immediately.
+                        asyncio.create_task(self._send_hello(session, on_text))
                         hello_sent_here = True
                     try:
                         reason = await self._session_loop(session, on_text)
@@ -412,6 +513,8 @@ class GeminiLiveClient:
                         except Exception:
                             pass
                 return reason
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 last_err = e
                 msg = str(e)
@@ -466,7 +569,7 @@ class GeminiLiveClient:
         """One-time pipeline self-test: ask the model for a one-line reply.
 
         Proves the TEXT path works even in a silent room. Reply arrives via
-        the normal _consume path. Never raises.
+        the normal _consume path. Never raises (except CancelledError).
         """
         try:
             log.info("self-test: requesting one-line reply from model...")
@@ -483,6 +586,8 @@ class GeminiLiveClient:
                 try:
                     await session.send_realtime_input(text=hello)
                     sent = True
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
                     log.debug("hello realtime send failed: %s", e)
             if not sent and hasattr(session, "send_client_content") and types is not None:
@@ -490,6 +595,8 @@ class GeminiLiveClient:
                     turn = types.Content(role="user", parts=[types.Part.from_text(text=hello)])
                     await session.send_client_content(turns=turn, turn_complete=True)
                     sent = True
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
                     log.debug("hello client-content send failed: %s", e)
             if sent:
@@ -497,6 +604,8 @@ class GeminiLiveClient:
                 log.info("self-test hello sent, waiting for reply...")
             else:
                 log.warning("self-test hello could not be sent (no supported method)")
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             log.debug("hello error: %s", e)
 
@@ -549,6 +658,12 @@ class GeminiLiveClient:
                         t.cancel()
                 except Exception:
                     pass
+            # Reap cancellations so recycles don't leak pending tasks that
+            # later log "exception never retrieved" / "task destroyed pending".
+            try:
+                await asyncio.gather(producer, consumer, watcher, return_exceptions=True)
+            except Exception:
+                pass
 
     async def _send_speaker_marker(self, session, marker: str) -> None:
         """Send [SPEAKER: ...] hint so model knows who is talking."""
@@ -558,6 +673,8 @@ class GeminiLiveClient:
                 try:
                     await session.send_realtime_input(text=marker)
                     return
+                except asyncio.CancelledError:
+                    raise
                 except TypeError:
                     pass
                 except Exception as e:
@@ -567,31 +684,90 @@ class GeminiLiveClient:
                 try:
                     turn = types.Content(role="user", parts=[types.Part.from_text(text=marker)])
                     await session.send_client_content(turns=turn, turn_complete=False)
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
                     log.debug("marker client-content send failed: %s", e)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             log.debug("speaker marker error: %s", e)
 
     async def _produce(self, session) -> None:
+        import time as _time
+
+        pending_marker: Optional[str] = None
         while not self._stop.is_set():
             try:
-                # 1) drain speaker markers first (who-is-talking hints)
+                # 1) Poll speaker markers non-blocking into pending (latest
+                # wins). Never send before audio: a marker must not delay
+                # the next audio frame by more than ~10ms.
                 if self.speaker_queue is not None:
                     try:
                         while True:
                             marker = self.speaker_queue.get_nowait()
                             if marker:
-                                await self._send_speaker_marker(session, str(marker))
+                                pending_marker = str(marker)
+                    except asyncio.CancelledError:
+                        raise
                     except Exception:
                         pass  # empty queue
+                # 2) Poll audio non-blocking (10ms) instead of a 200ms
+                # blocking get + thread hop.
                 if self.audio_queue is None:
-                    await asyncio.sleep(0.05)
+                    # Audio idle: safe to flush marker (throttled 1/500ms).
+                    if pending_marker is not None:
+                        now = _time.monotonic()
+                        if now - float(getattr(self, "_last_marker_time", 0.0) or 0.0) >= MARKER_THROTTLE_S:
+                            self._last_marker_time = now
+                            try:
+                                await self._send_speaker_marker(session, pending_marker)
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception:
+                                pass
+                            pending_marker = None
+                    await asyncio.sleep(0.01)
                     continue
                 try:
-                    pcm: bytes = await asyncio.to_thread(self.audio_queue.get, True, 0.2)
+                    pcm: bytes = self.audio_queue.get_nowait()
+                except asyncio.CancelledError:
+                    raise
                 except Exception:
-                    continue  # timeout -> loop again to check markers
+                    # Gotten queue empty -> flush marker if idle, then poll.
+                    if pending_marker is not None:
+                        now = _time.monotonic()
+                        if now - float(getattr(self, "_last_marker_time", 0.0) or 0.0) >= MARKER_THROTTLE_S:
+                            self._last_marker_time = now
+                            try:
+                                await self._send_speaker_marker(session, pending_marker)
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception:
+                                pass
+                            pending_marker = None
+                    await asyncio.sleep(0.01)
+                    continue
+                # Flush backlog to latest: keep realtime, drop oldest stale
+                # frames when >8 queued (would add >1s latency otherwise).
+                try:
+                    _qsize = int(self.audio_queue.qsize())
+                except Exception:
+                    _qsize = 0
+                if _qsize > AUDIO_BACKLOG_FLUSH_THRESHOLD:
+                    try:
+                        while True:
+                            pcm = self.audio_queue.get_nowait()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        pass
+                    try:
+                        log.debug("audio backlog flush: dropped stale frames, latest kept (qsize=%d)", _qsize)
+                    except Exception:
+                        pass
                 if not pcm:
+                    await asyncio.sleep(0.01)
                     continue
                 try:
                     blob = types.Blob(data=pcm, mime_type="audio/pcm;rate=16000")  # type: ignore[union-attr]
@@ -611,18 +787,80 @@ class GeminiLiveClient:
                             or "1000" in em or "1001" in em or "websocket" in en):
                         raise
                     log.debug("audio send hiccup (kept alive): %s", str(e)[:200])
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.01)
                     continue
+                # 3) After audio is sent, flush pending marker (throttled).
+                if pending_marker is not None:
+                    now = _time.monotonic()
+                    if now - float(getattr(self, "_last_marker_time", 0.0) or 0.0) >= MARKER_THROTTLE_S:
+                        self._last_marker_time = now
+                        try:
+                            await self._send_speaker_marker(session, pending_marker)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            pass
+                        pending_marker = None
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                # Do not swallow connection-dead errors raised by the audio
+                # send path above (it re-raises on closed/1007/1008/...):
+                # those must propagate so _session_loop can recycle.
+                _en = type(e).__name__.lower()
+                _em = str(e).lower()
+                if ("closed" in _en or "closed" in _em or "1007" in _em or "1008" in _em
+                        or "1000" in _em or "1001" in _em or "websocket" in _en):
+                    raise
                 # Never kill a healthy session on a produce-side bug: log + keep going.
                 # The consumer task owns session lifetime; connection loss surfaces there.
                 log.debug("produce error (kept alive): %s", str(e)[:200])
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.01)
+
+    async def _reply_tool(self, session, name: str, call_id, result: str) -> None:
+        """Send one FunctionResponse, tolerating SDK variants. Never raises."""
+        formatted = str(result or "")
+        try:
+            if hasattr(session, "send_tool_response"):
+                if types is not None:
+                    try:
+                        try:
+                            fr = types.FunctionResponse(name=name, id=call_id, response={"result": formatted})  # type: ignore[call-arg]
+                        except TypeError:
+                            try:
+                                fr = types.FunctionResponse(name=name, response={"result": formatted})  # type: ignore[call-arg]
+                            except Exception:
+                                fr = {"name": name, "response": {"result": formatted}}
+                        await session.send_tool_response(function_responses=[fr])
+                        return
+                    except asyncio.CancelledError:
+                        raise
+                    except TypeError:
+                        try:
+                            await session.send_tool_response([{"name": name, "response": {"result": formatted}}])  # type: ignore[arg-type]
+                            return
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as e2:
+                            log.debug("send_tool_response fallback failed: %s", e2)
+                    except Exception as e:
+                        log.debug("send_tool_response failed: %s", e)
+            if hasattr(session, "send_realtime_input"):
+                try:
+                    await session.send_realtime_input(text=formatted)
+                except asyncio.CancelledError:
+                    raise
+                except TypeError:
+                    pass
+                except Exception as e:
+                    log.debug("tool realtime fallback failed: %s", e)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.debug("tool reply failed: %s", e)
 
     async def _handle_tool_call(self, session, tc, on_text) -> None:
-        """Execute web_search function calls from the Live model. Never raises."""
+        """Execute web_search function calls from the Live model. Never raises (except CancelledError)."""
         try:
             try:
                 import websearch as _websearch  # lazy to avoid circulars
@@ -657,6 +895,15 @@ class GeminiLiveClient:
                             or getattr(fc, "call_id", None)
                         )
                     if name != "web_search":
+                        # Never silently drop a function call: the model blocks
+                        # waiting for a function_response. Reply with an error.
+                        try:
+                            _err = f"Unsupported function {name!r} (only web_search is available)."
+                            await self._reply_tool(session, name or "unknown", call_id, _err)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            pass
                         continue
                     # args may be JSON string or dict
                     if isinstance(args, str):
@@ -669,56 +916,45 @@ class GeminiLiveClient:
                         args = {"query": str(args or "")}
                     query = str(args.get("query", "") or "").strip()
                     if not query:
+                        try:
+                            await self._reply_tool(session, "web_search", call_id, "Missing 'query' argument.")
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            pass
                         continue
                     try:
                         result = await asyncio.to_thread(
                             _websearch.search_sync, query, self.web_max_results
                         )
+                    except asyncio.CancelledError:
+                        raise
                     except Exception as e:
                         result = f"Search failed: {e}"
                     formatted = f"WEB RESULT for '{query}':\n{result}"
                     # Reply to model so it can use the facts.
                     try:
-                        if hasattr(session, "send_tool_response") and types is not None:
-                            try:
-                                fr_kwargs: dict = {"response": {"result": result}}
-                                # FunctionResponse name/id field names vary by SDK; try both.
-                                try:
-                                    fr = types.FunctionResponse(name="web_search", id=call_id, **fr_kwargs)  # type: ignore[call-arg]
-                                except TypeError:
-                                    try:
-                                        fr = types.FunctionResponse(name="web_search", response={"result": result})  # type: ignore[call-arg]
-                                    except Exception:
-                                        fr = {"name": "web_search", "response": {"result": result}}
-                                await session.send_tool_response(function_responses=[fr])
-                            except TypeError:
-                                # older SDK: positional / different kw
-                                try:
-                                    await session.send_tool_response([{"name": "web_search", "response": {"result": result}}])  # type: ignore[arg-type]
-                                except Exception as e2:
-                                    log.debug("send_tool_response fallback failed: %s", e2)
-                        elif hasattr(session, "send_realtime_input"):
-                            try:
-                                await session.send_realtime_input(text=formatted)
-                            except TypeError:
-                                pass
+                        await self._reply_tool(session, "web_search", call_id, formatted)
+                    except asyncio.CancelledError:
+                        raise
                     except Exception as e:
                         log.debug("tool response send failed: %s", e)
-                        try:
-                            if hasattr(session, "send_realtime_input"):
-                                await session.send_realtime_input(text=formatted)
-                        except Exception:
-                            pass
                     # Also forward to HUD so the user sees the facts.
                     try:
                         r = on_text("\n" + formatted + "\n")
                         if asyncio.iscoroutine(r):
                             await r
+                    except asyncio.CancelledError:
+                        raise
                     except Exception as e:
                         log.debug("tool HUD forward failed: %s", e)
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
                     log.debug("tool_call entry failed: %s", e)
                     continue
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             log.debug("handle_tool_call failed: %s", e)
 
@@ -736,6 +972,16 @@ class GeminiLiveClient:
             except Exception:
                 pass
 
+        async def _put_separator() -> None:
+            # Lightweight separator: no rx_chunks/last_rx_time accounting
+            # (reduces turn_complete overhead, keeps hello-answer check honest).
+            try:
+                r = on_text("\n\n---\n\n")
+                if asyncio.iscoroutine(r):
+                    await r
+            except Exception:
+                pass
+
         try:
             async for response in session.receive():
                 if self._stop.is_set():
@@ -750,9 +996,13 @@ class GeminiLiveClient:
                     if tc:
                         try:
                             await self._handle_tool_call(session, tc, on_text)
+                        except asyncio.CancelledError:
+                            raise
                         except Exception as e:
                             log.debug("tool_call handling failed: %s", e)
                         continue
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
                     log.debug("tool_call check failed: %s", e)
                 try:
@@ -768,7 +1018,7 @@ class GeminiLiveClient:
                         continue
                     # auto-separate answers per turn for readable HUD
                     if getattr(sc, "turn_complete", False):
-                        await _put("\n\n---\n\n")
+                        await _put_separator()
                         continue
                     # AUDIO-native models deliver text via transcription fields
                     ot = getattr(sc, "output_transcription", None)
@@ -787,13 +1037,33 @@ class GeminiLiveClient:
                             if itext:
                                 self.it_chunks += 1
                                 log.info("heard (%d chars): %r", len(itext), itext[:150])
+                                # Fast-path: flush any pending speaker marker
+                                # (non-blocking, throttled) so the model knows
+                                # who just spoke without delaying the turn.
+                                try:
+                                    import time as _mt
+                                    if self.speaker_queue is not None and (
+                                            _mt.monotonic() - float(getattr(self, "_last_marker_time", 0.0) or 0.0) >= MARKER_THROTTLE_S):
+                                        try:
+                                            _m = self.speaker_queue.get_nowait()
+                                        except Exception:
+                                            _m = None
+                                        if _m:
+                                            self._last_marker_time = _mt.monotonic()
+                                            asyncio.create_task(self._send_speaker_marker(session, str(_m)))
+                                except asyncio.CancelledError:
+                                    raise
+                                except Exception:
+                                    pass
+                    except asyncio.CancelledError:
+                        raise
                     except Exception:
                         pass
                     turn = getattr(sc, "model_turn", None)
                     if not turn:
                         # interrupted / generation complete still worth separating
                         if getattr(sc, "generation_complete", False):
-                            await _put("\n\n---\n\n")
+                            await _put_separator()
                         continue
                     parts = getattr(turn, "parts", []) or []
                     texts = [getattr(part, "text", None) for part in parts]

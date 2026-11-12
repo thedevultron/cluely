@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>InterviewCopilot — Architecture &amp; Deployment</title>
+<style>
+:root{
+  --bg:#0a0a0a; --panel:#151515; --card:#262626; --border:#353535;
+  --text:#ffffff; --secondary:#8d8d8d; --tertiary:#999999; --highlight:#d9d9d9;
+  --accent:#27f795;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--highlight);
+  font:15px/1.65 'Roboto',system-ui,-apple-system,'Segoe UI',sans-serif}
+.wrap{max-width:1200px;margin:0 auto;padding:0 24px}
+.mono,code,pre,summary,.tag,.wf,.num,.cta,.ghost,.stat-fig,.stat-lab,nav.toc a{font-family:ui-monospace,Consolas,monospace}
+
+/* nav */
+nav.toc{position:sticky;top:0;z-index:10;background:var(--bg);border-bottom:1px solid var(--border)}
+nav.toc .wrap{display:flex;align-items:center;gap:16px;height:56px;overflow-x:auto}
+.brand{font-family:ui-monospace,Consolas,monospace;font-size:13px;color:var(--accent);text-decoration:none;white-space:nowrap}
+nav.toc a{color:var(--secondary);font-size:12px;text-decoration:none;padding:4px 6px;white-space:nowrap}
+nav.toc a:hover{color:var(--text)}
+nav.toc a.active{color:var(--accent)}
+
+/* hero */
+.hero{text-align:center;padding:96px 24px 72px;border-bottom:1px solid var(--border)}
+.wf{font-size:13px;margin:0 0 28px;color:var(--secondary)}
+.wf .on{color:var(--accent)}
+.wf .sep{color:var(--border);margin:0 10px}
+h1{margin:0 auto;font-size:64px;line-height:1.05;font-weight:700;letter-spacing:-0.020em;color:var(--text);max-width:900px}
+.sub{margin:22px auto 0;font-size:18px;line-height:1.5;color:var(--secondary);max-width:560px}
+.ctas{margin-top:36px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+.cta{background:var(--accent);color:#000;text-decoration:none;font-size:15px;font-weight:600;padding:14px 30px;border-radius:4px}
+.ghost{border:1px solid var(--border);color:var(--text);text-decoration:none;font-size:15px;padding:14px 30px;border-radius:4px}
+.ghost:hover{border-color:var(--accent);color:var(--accent)}
+.tags{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:36px}
+.tag{font-size:12px;color:var(--highlight);border:1px solid var(--border);border-radius:4px;padding:6px 12px}
+.stats{display:flex;gap:56px;justify-content:center;flex-wrap:wrap;margin-top:64px}
+.stat{text-align:center}
+.stat-fig{font-size:56px;line-height:1;letter-spacing:-0.084em;color:var(--accent)}
+.stat-lab{font-size:12px;color:var(--tertiary);margin-top:8px;text-transform:uppercase;letter-spacing:.08em}
+
+/* sections */
+main .wrap{padding-top:80px}
+section{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:24px;margin-bottom:80px;scroll-margin-top:80px}
+section.flash{border-color:var(--accent)}
+.eyebrow{font-family:ui-monospace,Consolas,monospace;font-size:12px;color:var(--accent);letter-spacing:.12em;text-transform:uppercase;margin:0 0 8px}
+h2{margin:0 0 16px;font-size:24px;font-weight:700;letter-spacing:-0.01em;color:var(--text)}
+.num{color:var(--accent);font-size:13px;margin-right:10px}
+h3{margin:28px 0 10px;font-size:18px;font-weight:600;color:var(--text)}
+p{margin:10px 0;max-width:78ch}
+ul,ol{margin:10px 0;padding-left:22px}
+li{margin:5px 0}
+.muted{color:var(--secondary)}
+code{background:var(--card);color:var(--accent);padding:1px 6px;border-radius:4px;font-size:13px}
+.codewrap{position:relative;margin:14px 0}
+pre{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;margin:0;overflow-x:auto;font-size:13px;line-height:1.55;color:var(--highlight)}
+.copybtn{position:absolute;top:8px;right:8px;background:var(--panel);color:var(--secondary);border:1px solid var(--border);border-radius:4px;font-family:ui-monospace,Consolas,monospace;font-size:12px;padding:4px 10px;cursor:pointer}
+.copybtn:hover{color:var(--accent);border-color:var(--accent)}
+table{width:100%;border-collapse:collapse;margin:14px 0;font-size:14px}
+th{font-family:ui-monospace,Consolas,monospace;font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--tertiary);text-align:left;padding:8px 10px;border-bottom:1px solid var(--border)}
+td{padding:9px 10px;border-bottom:1px solid var(--border);vertical-align:top}
+.callout{border-left:2px solid var(--accent);background:var(--card);border-radius:0 4px 4px 0;padding:14px 18px;margin:20px 0}
+.callout strong{color:var(--text)}
+.diagram{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;margin:14px 0}
+.diagram svg{width:100%;min-width:760px;height:auto;display:block}
+.node{cursor:pointer}
+.node:hover rect,.node:hover .nb{stroke:var(--accent)}
+details{margin:14px 0}
+summary{cursor:pointer;color:var(--accent);font-size:13px}
+summary:hover{color:var(--text)}
+footer{border-top:1px solid var(--border);padding:32px 24px;text-align:center}
+footer p{font-family:ui-monospace,Consolas,monospace;font-size:13px;color:var(--tertiary);margin:4px 0}
+@media (max-width:760px){h1{font-size:40px}.hero{padding:64px 16px 48px}section{padding:18px;margin-bottom:48px}}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{transition:none!important;animation:none!important}}
+@media print{
+  body{background:#fff;color:#111}
+  nav.toc,.ctas,.copybtn{display:none}
+  .hero{padding:24px 0;border-bottom:1px solid #999}
+  h1{color:#000;font-size:24pt}.sub,.muted{color:#333}
+  section{background:#fff;border:1px solid #999;border-radius:0;break-inside:avoid;margin-bottom:24px}
+  h2,h3{color:#000}.num,.eyebrow,summary{color:#063}
+  th{color:#000}td,th{border-color:#bbb}
+  code{background:#eee;color:#000}
+  pre{background:#f7f7f7;color:#111;border-color:#bbb}
+  .tag,.ghost{border-color:#999;color:#000}
+  .diagram{background:#fff;border-color:#bbb}
+  .callout{background:#f0f0f0}
+  footer{border-top-color:#999}
+}
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="wrap">
+    <p class="wf"><span class="on">[Architecture]</span><span class="sep">|</span>[File map]<span class="sep">|</span>[Pipeline]<span class="sep">|</span>[Build]</p>
+    <h1>InterviewCopilot Architecture</h1>
+    <p class="sub">System audio goes in. Short text hints come out. This page maps every module, queue, and failure mode.</p>
+    <div class="ctas">
+      <a class="cta" href="#overview">Read the overview</a>
+      <a class="ghost" href="#build">Jump to build</a>
+    </div>
+    <div class="tags">
+      <span class="tag">PySide6</span><span class="tag">Windows 10 2004+</span><span class="tag">Python 3.14.7</span><span class="tag">Gemini Live</span><span class="tag">16 kHz PCM</span><span class="tag">Text only</span>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="stat-fig">16</div><div class="stat-lab">kHz capture rate</div></div>
+      <div class="stat"><div class="stat-fig">1024</div><div class="stat-lab">samples per chunk</div></div>
+      <div class="stat"><div class="stat-fig">5s</div><div class="stat-lab">stats ticker</div></div>
+      <div class="stat"><div class="stat-fig">26</div><div class="stat-lab">headless tests</div></div>
+    </div>
+  </div>
+</header>
+
+<nav class="toc"><div class="wrap">
+  <a class="brand" href="#top">InterviewCopilot</a>
+  <a href="#overview">01 Overview</a><a href="#map">02 File map</a><a href="#pipeline">03 Pipeline</a>
+  <a href="#diagram">04 Diagram</a><a href="#sequence">05 Sequence</a><a href="#threading">06 Threading</a>
+  <a href="#config">07 Config</a><a href="#settings">08 Settings</a><a href="#failures">09 Failures</a>
+  <a href="#build">10 Build</a><a href="#testing">11 Testing</a><a href="#security">12 Security</a>
+</div></nav>
+
+<main id="top"><div class="wrap">
+
+<!-- 01 OVERVIEW -->
+<section id="overview">
+  <p class="eyebrow">Start</p>
+  <h2><span class="num">01</span>Overview</h2>
+  <p>InterviewCopilot listens to system audio on Windows. It streams the audio to a Gemini Live model. Short text replies appear on a stealth HUD. The app captures no screen pixels. It uses no microphone by default. An optional dual mode adds the microphone.</p>
+  <h3>Design principles</h3>
+  <ul>
+    <li><strong>Never crash, never hang the UI.</strong> Device APIs can block. Every hardware query runs with a hard timeout.</li>
+    <li><strong>Drop, do not buffer.</strong> Audio queues stay bounded. Full queues drop the oldest frame.</li>
+    <li><strong>Text in, text out.</strong> The Live session uses AUDIO modality with server-side transcription. Pure TEXT sessions fail server-side with code 1007 (verified Oct 2026). The HUD shows text only. Audio never plays.</li>
+    <li><strong>PySide6 only.</strong> One Qt binding keeps the exe lean. The build excludes PyQt5, PyQt6, and PySide2. Dual bindings would bloat the exe to about 500 MB.</li>
+    <li><strong>Stealth by default.</strong> The HUD sets WDA_EXCLUDEFROMCAPTURE. Screenshots and screen shares miss it. Global hotkeys hide and show it.</li>
+  </ul>
+  <h3>Stack</h3>
+  <table>
+    <tr><th>Layer</th><th>Technology</th></tr>
+    <tr><td>UI / HUD / settings</td><td>PySide6 (QtCore/QtWidgets/QtGui)</td></tr>
+    <tr><td>Audio capture</td><td><code>soundcard</code> (loopback) + <code>sounddevice</code> (mic)</td></tr>
+    <tr><td>Audio processing</td><td><code>numpy</code> (resample / mix / energies)</td></tr>
+    <tr><td>Live model</td><td><code>google-genai</code> SDK, <code>bidiGenerateContent</code></td></tr>
+    <tr><td>Web tool</td><td><code>httpx</code> + DuckDuckGo HTML endpoint (no key)</td></tr>
+    <tr><td>PDF knowledge</td><td><code>pypdf</code></td></tr>
+    <tr><td>Hotkeys</td><td><code>pynput</code> (Win32)</td></tr>
+    <tr><td>Packaging</td><td>PyInstaller (+ Inno Setup, see section 10)</td></tr>
+  </table>
+  <h3>Entry points</h3>
+  <table>
+    <tr><th>Command</th><th>Behavior</th></tr>
+    <tr><td><code>python main.py</code></td><td>Full flow: settings dialog, then HUD, audio, and Live session.</td></tr>
+    <tr><td><code>python main.py --auto</code></td><td>Skip settings. Launch with the saved <code>config.json</code>. Warns when the API key is empty.</td></tr>
+    <tr><td><code>python main.py --diag</code></td><td>Headless checks, no GUI: masked config, device list, 6-second audio probe, Live self-test hello (up to 60 s). Exit code 0 means PASS, 1 means FAIL.</td></tr>
+    <tr><td><code>python build_exe.py</code></td><td>Build, default onedir. Use <code>--onefile</code> for a single file, <code>--console</code> to keep a console for <code>--diag</code>, <code>--no-clean</code> to skip <code>--clean</code>.</td></tr>
+    <tr><td><code>python -m pytest tests/ -v</code></td><td>Headless tests. See section 11.</td></tr>
+  </table>
+</section>
+
+<!-- 02 FILE MAP -->
+<section id="map">
+  <h2><span class="num">02</span>File map</h2>
+  <p class="muted">Sizes and line counts come from the shipped source. Treat this section as read-only context, except for <code>build_exe.py</code>, <code>requirements.txt</code>, and the deployment docs.</p>
+  <table>
+    <tr><th>File</th><th>Size · Lines</th><th>Role</th><th>Key symbols</th></tr>
+    <tr><td><code>main.py</code></td><td>~31 KB · 777</td><td>Entry point. Loads config, shows settings (or uses <code>--auto</code>), then runs <code>run_hud_session()</code>. Owns session wiring, prompt enrichment, transcript file, and HUD / Live / audio lifecycle.</td><td><code>main(argv)</code>, <code>run_hud_session(config)</code>, <code>run_diag()</code>, <code>DIFFICULTY_PROMPTS</code>, <code>_enrich_instruction()</code>, <code>_mask_key()</code>, <code>_log_launch_diagnostics()</code></td></tr>
+    <tr><td><code>audio_engine.py</code></td><td>~33 KB · 831</td><td>WASAPI loopback capture (<code>soundcard</code>) plus optional mic (<code>sounddevice</code>). Resamples 48 k to 16 k, mixes, and classifies speakers by energy.</td><td><code>AudioEngine</code>, <code>list_loopbacks()</code>, <code>list_microphones()</code>, <code>detect_system_audio()</code>, <code>mix_audio_frames()</code>, <code>classify_speaker()</code>, <code>TARGET_RATE</code>, <code>CHUNK_SAMPLES</code></td></tr>
+    <tr><td><code>gemini_live_client.py</code></td><td>~44 KB · 900</td><td>Async Gemini Live producer and consumer. Runs a model fallback chain, exponential backoff, proactive session recycle, self-test hello, optional web-search tool calls, and a flash-lite summarizer.</td><td><code>GeminiLiveClient</code>, <code>run()</code>, <code>_run_session()</code>, <code>_produce()</code>, <code>_consume()</code>, <code>_candidates()</code>, <code>_build_live_config()</code>, <code>summarize()</code></td></tr>
+    <tr><td><code>overlay_window.py</code></td><td>~30 KB · 806</td><td>Stealth HUD. Capture-excluded, click-through, borderless window. Qt signals bridge worker threads. Global hotkeys via <code>pynput</code>.</td><td><code>OverlayWindow</code>, <code>text_signal</code>, <code>status_signal</code>, <code>apply_capture_exclusion()</code>, <code>is_capture_exclusion_supported()</code>, <code>start_hotkeys()</code></td></tr>
+    <tr><td><code>settings_dialog.py</code></td><td>~40 KB · 926</td><td>Pre-launch settings dialog. Five tabs (API &amp; Model, Audio, Knowledge &amp; Search, Prompt &amp; HUD, Controls). Async device scan. Stealth banner.</td><td><code>SettingsDialog</code>, <code>launch_requested</code>, <code>MODEL_CHOICES</code>, <code>THINKING_CHOICES</code>, <code>DIFFICULTY_CHOICES</code></td></tr>
+    <tr><td><code>config_manager.py</code></td><td>~13 KB · 295</td><td>Thread-safe (<code>RLock</code>) JSON config. Holds defaults, validation and clamping, atomic save, and frozen-aware path resolution.</td><td><code>DEFAULT_CONFIG</code>, <code>get_config_path()</code>, <code>validate_config()</code>, <code>load_config()</code>, <code>save_config()</code>, <code>update_config()</code></td></tr>
+    <tr><td><code>knowledge.py</code></td><td>~5.5 KB · 155</td><td>Local knowledge-base loader. Walks user files and folders (<code>.txt/.md/.py/.json/.csv/.pdf/…</code>), skips files over 1 MB and binaries, concatenates truncated content for the prompt. Never raises.</td><td><code>load_knowledge()</code>, <code>list_knowledge_files()</code></td></tr>
+    <tr><td><code>websearch.py</code></td><td>~3.8 KB · 121</td><td>Free DuckDuckGo search through the <code>httpx</code> HTML endpoint. Parses with stdlib regex. Failure returns a <code>"Search failed: …"</code> string.</td><td><code>search_sync()</code>, <code>web_search_tool()</code></td></tr>
+    <tr><td><code>build_exe.py</code></td><td>~6 KB · 181</td><td>PyInstaller build script (see section 10). Builds the Windows exe with hidden imports, collect-all, version resource, icon, and an onedir / onefile switch.</td><td><code>build()</code>, <code>main()</code>, <code>ensure_version_info()</code>, <code>HIDDEN_IMPORTS</code>, <code>VERSION_INFO_TXT</code></td></tr>
+    <tr><td><code>requirements.txt</code></td><td>~0.4 KB · 14</td><td>Runtime pins (minimum versions). Leaves <code>pytest</code> as a comment. Install it separately for dev work.</td><td>—</td></tr>
+    <tr><td><code>InterviewCopilot.spec</code></td><td>~1.8 KB · 57</td><td>Generated PyInstaller spec (onedir). <strong>Build artifact.</strong> <code>build_exe.py</code> regenerates it on every build. Absolute paths tie it to one machine. Do not hand-edit it.</td><td>—</td></tr>
+    <tr><td><code>version_info.txt</code></td><td>~0.95 KB · 32</td><td>Windows version resource. Rewrites verbatim from <code>build_exe.VERSION_INFO_TXT</code> on each build.</td><td><code>FileVersion 1.0.0</code></td></tr>
+    <tr><td><code>installer.iss</code></td><td>~1.8 KB · 46</td><td>Inno Setup 6 script. Compile manually after a build. Ships <code>dist\InterviewCopilot\*</code>.</td><td><code>MyAppVersion 1.0.0</code></td></tr>
+    <tr><td><code>app_icon.ico</code></td><td>~17 KB · —</td><td>Exe and installer icon. Must exist for <code>--icon</code>.</td><td>—</td></tr>
+  </table>
+  <div class="callout">
+    <strong>Import discipline.</strong> <code>main.py</code> imports only <code>config_manager</code>, <code>audio_engine</code>, and <code>gemini_live_client</code> at top level. It imports <code>overlay_window</code>, <code>settings_dialog</code>, and <code>knowledge</code> lazily inside functions. That keeps <code>import main</code> GUI-free and testable.
+  </div>
+</section>
+
+<!-- 03 PIPELINE -->
+<section id="pipeline">
+  <h2><span class="num">03</span>How it works</h2>
+  <p>The pipeline runs in a straight line. One loop exists: the Live session recycle.</p>
+  <ol>
+    <li><strong>Startup.</strong> <code>main.main()</code> parses <code>--diag</code> and <code>--auto</code>, loads <code>config.json</code> (defaults merged), and either shows settings or calls <code>run_hud_session()</code>.</li>
+    <li><strong>Enrich.</strong> <code>_enrich_instruction()</code> appends the speaker protocol, the difficulty prompt (EASY / MEDIUM / HARD / EXPERT), candidate context (role / company), and knowledge-base content when enabled. The function is idempotent. You can call it twice.</li>
+    <li><strong>Capture.</strong> <code>AudioEngine.start()</code> spawns two daemon threads: <code>audio-loopback</code> (WASAPI via <code>soundcard</code>) and <code>audio-mixer</code>. Each loopback chunk resamples to <strong>16 kHz mono</strong> and lands in a rolling buffer.</li>
+    <li><strong>Mix and classify.</strong> The mixer takes the latest loopback chunk (plus mic in dual mode), pads or truncates to <code>CHUNK_SAMPLES = 1024</code> (about 64 ms), mixes with <code>numpy</code>, computes abs-mean energies, and classifies the speaker (<code>interviewer</code> / <code>candidate</code> / <code>both</code> / <code>silence</code>) with a 2-frame debounce.</li>
+    <li><strong>Queue.</strong> Mixed PCM (16-bit, 16 kHz) goes to <code>output_queue</code>. Speaker markers (<code>[SPEAKER: …]</code>) go to <code>speaker_queue</code>. Both queues are bounded. Overflow drops the oldest item.</li>
+    <li><strong>Produce.</strong> <code>_produce()</code> drains speaker markers first, then audio frames. It sends them as <code>audio/pcm;rate=16000</code> realtime input.</li>
+    <li><strong>Model.</strong> Gemini Live (AUDIO modality, input/output transcription, automatic activity detection with 80 ms prefix padding and 150 ms silence duration, <code>TURN_INCLUDES_ALL_INPUT</code>) hears the turns and answers in audio. The client transcribes the answer to text. The HUD stays text-only.</li>
+    <li><strong>Consume.</strong> <code>_consume()</code> reads the session, handles text deltas and the optional <code>web_search</code> function tool, and calls <code>on_text</code>.</li>
+    <li><strong>Render.</strong> Each signal crosses back to the Qt thread through <code>hud.text_signal</code> (<code>QueuedConnection</code>). The HUD appends it as markdown-lite HTML. Status crosses through <code>hud.status_signal</code>.</li>
+    <li><strong>Record.</strong> When enabled, the app appends model text to <code>transcripts/session_&lt;timestamp&gt;.md</code> without blocking the event loop (<code>asyncio.to_thread</code>).</li>
+    <li><strong>Recycle.</strong> Every 10 minutes (configurable, min 120 s) the session recycles to bound server-side context drift. The outer loop reconnects with exponential backoff (2 s × 1.6, capped at 30 s) and a fallback model chain.</li>
+  </ol>
+  <h3>The self-test hello</h3>
+  <p>On first connect the client asks the model to reply with exactly <code>audio pipeline OK</code>. It sends the hello through <code>send_realtime_input(text=…)</code>, then falls back to <code>send_client_content</code>. The reply arrives through the normal consume path. This proves the text path works in a silent room. The client tries up to 3 times. When the session dies within 10 s of the hello, the next session retries it.</p>
+  <h3>Timed jobs on the Qt thread (QTimer)</h3>
+  <table>
+    <tr><th>Timer</th><th>Interval</th><th>Job</th></tr>
+    <tr><td>Stats ticker</td><td>5 s</td><td>Logs combined audio and Live counters (<code>DIAG stats …</code>) for console diagnostics. Posts one HUD line: "Hearing audio OK" or "No audio frames yet".</td></tr>
+    <tr><td>Audio health checker</td><td>3 s</td><td>Warns once when the loopback device is down. Never overwrites the Live status pill.</td></tr>
+    <tr><td>Context summarizer</td><td>10 min</td><td>Sends the last ~6,000 chars of model text to the flash-lite summarizer. Appends the summary to HUD and transcript, then clears the buffer.</td></tr>
+    <tr><td>One-shot welcome</td><td>0.4 s</td><td>Appends the "Ready — &lt;mode&gt; audio, &lt;model&gt;" summary line.</td></tr>
+  </table>
+</section>
+
+<!-- 04 DIAGRAM -->
+<section id="diagram">
+  <p class="eyebrow">Modules</p>
+  <h2><span class="num">04</span>Component diagram</h2>
+  <p class="muted">Click a node to jump to its section.</p>
+  <div class="diagram">
+  <svg viewBox="0 0 980 470" role="img" aria-label="Component diagram">
+    <defs>
+      <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#27f795"/>
+      </marker>
+    </defs>
+    <style>
+      .box{fill:#262626;stroke:#353535;stroke-width:1.2}
+      .acc{fill:#151515;stroke:#27f795;stroke-width:1.2}
+      .q{fill:#151515;stroke:#353535;stroke-width:1.2}
+      .t{font:13px Consolas,monospace;fill:#ffffff}
+      .ts{font:11px Consolas,monospace;fill:#8d8d8d}
+      .ar{stroke:#27f795;stroke-width:1.5;fill:none}
+      .ar2{stroke:#27f795;stroke-width:1.3;fill:none;stroke-dasharray:5 4}
+    </style>
+    <!-- Processing group -->
+    <rect class="box" x="10" y="10" width="330" height="450"/>
+    <text class="ts" x="22" y="30">PROCESSING (audio_engine.py · gemini_live_client.py)</text>
+    <g class="node" data-t="pipeline"><rect class="acc" x="30" y="44" width="290" height="70"/>
+    <text class="t" x="42" y="64">OS audio → soundcard loopback (WASAPI)</text>
+    <text class="ts" x="42" y="82">48 kHz → 16 kHz resample (numpy) · _loopback_loop</text></g>
+    <g class="node" data-t="pipeline"><rect class="box" x="30" y="130" width="290" height="70"/>
+    <text class="t" x="42" y="150">Microphone → sounddevice (optional, dual mode)</text>
+    <text class="ts" x="42" y="168">mono int16 @ 16 kHz · _mic_buffer (50)</text></g>
+    <g class="node" data-t="map"><rect class="acc" x="30" y="216" width="290" height="84"/>
+    <text class="t" x="42" y="236">AudioEngine mixer + classify_speaker()</text>
+    <text class="ts" x="42" y="254">mix · energies · VAD (default 120)</text>
+    <text class="ts" x="42" y="270">debounce ×2 → [SPEAKER: …] marker</text></g>
+    <g class="node" data-t="threading"><rect class="q" x="30" y="318" width="125" height="56"/>
+    <text class="t" x="40" y="339">output_queue</text><text class="ts" x="40" y="356">bytes · max 200</text></g>
+    <g class="node" data-t="threading"><rect class="q" x="175" y="318" width="145" height="56"/>
+    <text class="t" x="185" y="339">speaker_queue</text><text class="ts" x="185" y="356">str · max 50</text></g>
+    <g class="node" data-t="sequence"><rect class="box" x="30" y="392" width="290" height="56"/>
+    <text class="t" x="42" y="412">GeminiLiveClient asyncio (run / _produce / _consume)</text>
+    <text class="ts" x="42" y="430">fallback chain · backoff · 10-min recycle · web_search tool</text></g>
+    <!-- UI group -->
+    <rect class="box" x="380" y="10" width="280" height="450"/>
+    <text class="ts" x="392" y="30">UI / Qt (overlay_window.py · settings_dialog.py · main.py)</text>
+    <g class="node" data-t="map"><rect class="acc" x="400" y="44" width="240" height="80"/>
+    <text class="t" x="412" y="64">OverlayWindow — stealth HUD</text>
+    <text class="ts" x="412" y="82">text_signal / status_signal (QueuedConnection)</text>
+    <text class="ts" x="412" y="98">WDA_EXCLUDEFROMCAPTURE · click-through · hotkeys</text></g>
+    <g class="node" data-t="settings"><rect class="box" x="400" y="140" width="240" height="80"/>
+    <text class="t" x="412" y="160">SettingsDialog — 5 tabs</text>
+    <text class="ts" x="412" y="178">API &amp; Model · Audio · Knowledge &amp; Search</text>
+    <text class="ts" x="412" y="194">Prompt &amp; HUD · Controls → launch_requested</text></g>
+    <g class="node" data-t="threading"><rect class="box" x="400" y="236" width="240" height="80"/>
+    <text class="t" x="412" y="256">QApplication (Qt main thread)</text>
+    <text class="ts" x="412" y="274">QTimer: 5 s stats · 3 s health · 10 min summary</text>
+    <text class="ts" x="412" y="290">Hotkeys: Ctrl+Alt+H/C/P/T/Q</text></g>
+    <g class="node" data-t="pipeline"><rect class="box" x="400" y="332" width="240" height="56"/>
+    <text class="t" x="412" y="352">transcripts/session_*.md</text>
+    <text class="ts" x="412" y="369">model text + summaries (if enabled)</text></g>
+    <!-- External group -->
+    <rect class="box" x="700" y="10" width="270" height="160"/>
+    <text class="ts" x="712" y="30">EXTERNAL (network)</text>
+    <g class="node" data-t="pipeline"><rect class="acc" x="716" y="44" width="238" height="66"/>
+    <text class="t" x="728" y="64">Gemini Live bidiGenerateContent</text>
+    <text class="ts" x="728" y="82">AUDIO + transcription · server endpoints</text>
+    <text class="ts" x="728" y="98">model ids: gemini-3.8-live …</text></g>
+    <g class="node" data-t="map"><rect class="box" x="716" y="126" width="238" height="30"/>
+    <text class="t" x="728" y="145">DuckDuckGo search (httpx, free, no key)</text></g>
+    <rect class="box" x="700" y="196" width="270" height="110"/>
+    <text class="ts" x="712" y="216">CONFIG &amp; DATA (config_manager.py · knowledge.py)</text>
+    <g class="node" data-t="config"><rect class="q" x="716" y="230" width="238" height="58"/>
+    <text class="t" x="728" y="250">config.json (gitignored secret file)</text>
+    <text class="ts" x="728" y="268">exe dir (frozen) · script dir (source)</text></g>
+    <g class="node" data-t="config"><rect class="box" x="700" y="322" width="270" height="66"/>
+    <text class="t" x="712" y="344">Local knowledge files/folders</text>
+    <text class="ts" x="712" y="362">.txt/.md/.py/.json/.csv/.pdf… ≤ 1 MB → prompt</text></g>
+    <!-- Arrows -->
+    <path class="ar" d="M 175 114 L 175 216" marker-end="url(#arr)"/>
+    <text class="ts" x="182" y="170">loopback chunks</text>
+    <path class="ar" d="M 175 200 L 175 216" marker-end="url(#arr)"/>
+    <text class="ts" x="182" y="212">mic chunks (dual)</text>
+    <path class="ar" d="M 92 300 L 92 318" marker-end="url(#arr)"/>
+    <path class="ar" d="M 248 300 L 248 318" marker-end="url(#arr)"/>
+    <path class="ar" d="M 155 374 L 155 392" marker-end="url(#arr)"/>
+    <path class="ar" d="M 155 374 L 500 388" marker-end="url(#arr)"/>
+    <path class="ar2" d="M 320 150 L 520 100" marker-end="url(#arr)"/>
+    <text class="ts" x="380" y="130">displayed via Qt signals</text>
+    <path class="ar2" d="M 320 420 L 800 110" marker-end="url(#arr)"/>
+    <text class="ts" x="560" y="280">audio + [SPEAKER] hints → back ← text deltas</text>
+    <path class="ar2" d="M 320 420 L 840 140" marker-end="url(#arr)"/>
+    <path class="ar2" d="M 780 110 L 780 230" marker-end="url(#arr)"/>
+    <text class="ts" x="788" y="174">tool calls</text>
+  </svg>
+  </div>
+  <p class="muted">Green arrows carry the audio payload. Dashed green arrows carry control and text. Qt <code>Signals</code> (<code>text_signal</code> / <code>status_signal</code>) remain the only sanctioned bridge from worker threads into the UI.</p>
+  <h3>Why two queues?</h3>
+  <p><code>output_queue</code> carries mixed PCM. <code>speaker_queue</code> carries out-of-band text hints about who speaks. The producer drains markers first. The model always knows the current speaker before the audio frame that follows. No ordering hacks. No timestamp juggling.</p>
+</section>
+
+<!-- 05 SEQUENCE -->
+<section id="sequence">
+  <h2><span class="num">05</span>Data-flow sequence</h2>
+  <div class="diagram">
+  <svg viewBox="0 0 980 560" role="img" aria-label="Data flow sequence diagram">
+    <defs>
+      <marker id="arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#27f795"/>
+      </marker>
+    </defs>
+    <style>
+      .lr{stroke:#353535;stroke-width:1.4}
+      .hh{font:12px Consolas,monospace;fill:#ffffff;text-anchor:middle}
+      .msg{stroke:#27f795;stroke-width:1.4;fill:none}
+      .jk{font:11px Consolas,monospace;fill:#8d8d8d}
+      .hb{fill:#151515;stroke:#353535}
+    </style>
+    <line class="lr" x1="90" y1="60" x2="90" y2="530"/>
+    <line class="lr" x1="230" y1="60" x2="230" y2="530"/>
+    <line class="lr" x1="380" y1="60" x2="380" y2="530"/>
+    <line class="lr" x1="540" y1="60" x2="540" y2="530"/>
+    <line class="lr" x1="700" y1="60" x2="700" y2="530"/>
+    <line class="lr" x1="870" y1="60" x2="870" y2="530"/>
+    <rect class="hb" x="10" y="20" width="160" height="30"/><rect class="hb" x="150" y="20" width="160" height="30"/>
+    <rect class="hb" x="310" y="20" width="140" height="30"/><rect class="hb" x="470" y="20" width="140" height="30"/>
+    <rect class="hb" x="620" y="20" width="160" height="30"/><rect class="hb" x="810" y="20" width="130" height="30"/>
+    <text class="hh" x="90" y="40">OS audio</text><text class="hh" x="230" y="40">AudioEngine</text>
+    <text class="hh" x="380" y="40">queues</text><text class="hh" x="540" y="40">GeminiLiveClient</text>
+    <text class="hh" x="700" y="40">Gemini Live</text><text class="hh" x="875" y="40">HUD (Qt)</text>
+    <path class="msg" d="M 90 80 L 230 80" marker-end="url(#arr3)"/>
+    <text class="jk" x="95" y="74">1. WASAPI loopback chunk (float32, any rate)</text>
+    <path class="msg" d="M 230 110 L 230 150" marker-end="url(#arr3)"/>
+    <text class="jk" x="240" y="104">2. _resample_mono → 16 kHz · energies</text>
+    <path class="msg" d="M 230 170 L 380 170" marker-end="url(#arr3)"/>
+    <text class="jk" x="235" y="164">3. put_nowait pcm (drop-oldest if full)</text>
+    <path class="msg" d="M 230 195 L 380 195" marker-end="url(#arr3)"/>
+    <text class="jk" x="235" y="189">4. put_nowait [SPEAKER: …] marker (if changed)</text>
+    <path class="msg" d="M 380 220 L 540 220" marker-end="url(#arr3)"/>
+    <text class="jk" x="385" y="214">5. _produce: get (0.2 s timeout), drain markers first</text>
+    <path class="msg" d="M 540 245 L 700 245" marker-end="url(#arr3)"/>
+    <text class="jk" x="545" y="239">6. send_realtime_input(audio=Blob pcm;rate=16000)</text>
+    <path class="msg" d="M 700 270 L 540 270" marker-end="url(#arr3)"/>
+    <text class="jk" x="545" y="294">7. session.receive() → transcription text deltas</text>
+    <path class="msg" d="M 540 315 L 875 315" marker-end="url(#arr3)"/>
+    <text class="jk" x="545" y="309">8. on_text → hud.text_signal.emit (thread-safe bridge)</text>
+    <path class="msg" d="M 875 340 L 875 380" marker-end="url(#arr3)"/>
+    <text class="jk" x="640" y="364">9. append_text_delta → markdown-lite HTML render</text>
+    <path class="msg" d="M 700 405 L 540 405" marker-end="url(#arr3)"/>
+    <text class="jk" x="545" y="399">10. (optional) web_search tool call → httpx → answer</text>
+    <path class="msg" d="M 540 430 L 700 430" marker-end="url(#arr3)"/>
+    <text class="jk" x="545" y="424">11. reconnect / fallback model · backoff · 10-min recycle</text>
+    <path class="msg" d="M 540 460 L 875 460" marker-end="url(#arr3)"/>
+    <text class="jk" x="545" y="454">12. on_status → hud.status_signal.emit</text>
+    <path class="msg" d="M 230 490 L 380 490" marker-end="url(#arr3)"/>
+    <text class="jk" x="235" y="484">13. transcripts/session_*.md (via asyncio.to_thread)</text>
+  </svg>
+  </div>
+  <h3>Audio budget</h3>
+  <ul>
+    <li><strong>16,000 Hz · mono · int16.</strong> Each <code>output_queue</code> frame holds exactly <code>1024 × 2 = 2048 bytes</code> (about 64 ms of audio).</li>
+    <li><strong>Queue depth caps latency.</strong> 200 frames equal about 12.8 s of worst-case backlog. Drop-oldest keeps real depth at 1–2 frames.</li>
+    <li><strong>Hangover = 2 frames.</strong> Two trailing-silence frames (~128 ms) follow speech. Turn boundaries stay intact. VAD debounce = 2 frames.</li>
+    <li><strong>Endpointing.</strong> Prefix padding = 80 ms. Silence wait = 150 ms. The server uses these for turn detection.</li>
+    <li><strong>Reply cap.</strong> <code>max_output_tokens = 160</code>. Long answers arrive late. Brevity buys latency.</li>
+  </ul>
+</section>
+
+<!-- 06 THREADING -->
+<section id="threading">
+  <h2><span class="num">06</span>Threading &amp; queues</h2>
+  <table>
+    <tr><th>Thread</th><th>Name / kind</th><th>Owns</th><th>Communicates via</th></tr>
+    <tr><td>Qt main thread</td><td>QApplication event loop</td><td>HUD rendering, settings dialog, QTimer jobs (stats 5 s, health 3 s, summarizer 10 min), hotkey signal slots.</td><td>Receives <code>text_signal</code> / <code>status_signal</code> / <code>opacity_signal</code> (<code>QueuedConnection</code>). Never blocks on hardware.</td></tr>
+    <tr><td>asyncio thread</td><td><code>gemini-live</code> (daemon)</td><td>The <code>GeminiLiveClient.run()</code> event loop: producer, consumer, and watcher tasks per session.</td><td>Reads <code>output_queue</code> / <code>speaker_queue</code>. Calls <code>on_text</code> / <code>on_status</code> (→ Qt signals). Model I/O stays async.</td></tr>
+    <tr><td>Audio threads</td><td><code>audio-loopback</code>, <code>audio-mixer</code> (daemon)</td><td>Loopback capture callback plus 16 kHz resampling. Mixing, VAD, speaker classification.</td><td><code>output_queue</code> (bytes), <code>speaker_queue</code> (str), internal <code>_mic_buffer</code>. Never touch Qt.</td></tr>
+    <tr><td>Settings worker</td><td><code>ThreadPoolExecutor(max_workers=1)</code></td><td>Mic and loopback enumeration with an 8 s hard timeout. A hanging audio API never freezes the dialog.</td><td>Result via <code>future.result(timeout)</code>. Failure yields an empty device list plus a warning banner.</td></tr>
+    <tr><td>Diag probes</td><td>One-shot executor (10 s timeout)</td><td>Launch diagnostics plus the <code>run_diag()</code> audio probe. Same timeout discipline as the settings worker.</td><td>Stdout prints only.</td></tr>
+  </table>
+  <h3>Queue reference</h3>
+  <table>
+    <tr><th>Queue</th><th>Type</th><th>Bound</th><th>Producer → consumer</th><th>Overflow policy</th></tr>
+    <tr><td><code>output_queue</code></td><td><code>queue.Queue[bytes]</code></td><td>200 frames (~12.8 s)</td><td>mixer → <code>_produce()</code></td><td>Drop oldest (<code>get_nowait</code> before <code>put_nowait</code>)</td></tr>
+    <tr><td><code>speaker_queue</code></td><td><code>queue.Queue[str]</code></td><td>50 markers</td><td>mixer / classifier → <code>_produce()</code></td><td>Drop oldest</td></tr>
+    <tr><td><code>_mic_buffer</code></td><td><code>queue.Queue[np.ndarray]</code></td><td>50 chunks</td><td>mic callback → mixer</td><td>Drop oldest</td></tr>
+    <tr><td>Qt signals</td><td>PySide6 <code>Signal</code></td><td>unbounded event queue</td><td>asyncio / audio threads → Qt thread</td><td>Delivered via <code>QueuedConnection</code>. Emission never blocks.</td></tr>
+  </table>
+  <div class="callout">
+    <strong>Two-process-model rule.</strong> Qt widgets change only on the Qt main thread. Worker threads use <code>Signal.emit()</code> or a <code>queue.Queue</code>. One deliberate exception exists: the quit hotkey calls <code>os._exit(0)</code> after emitting.
+  </div>
+</section>
+
+<!-- 07 CONFIG -->
+<section id="config">
+  <p class="eyebrow">Reference</p>
+  <h2><span class="num">07</span>Config schema</h2>
+  <p><code>config_manager.DEFAULT_CONFIG</code> is the single source of truth. Unknown keys in <code>config.json</code> stay preserved. Missing keys fall back to defaults. Corrupt JSON falls back to defaults. Writes stay atomic (<code>.tmp</code> + <code>os.replace</code>) under a process-wide <code>RLock</code>.</p>
+  <h3>Path logic (<code>get_config_path()</code>)</h3>
+  <ul>
+    <li><strong>Frozen exe</strong> (<code>sys.frozen</code>): <code>&lt;exe-dir&gt;/config.json</code>. The user edits this file and ships it next to the exe.</li>
+    <li><strong>Source run</strong>: <code>&lt;script-dir&gt;/config.json</code>.</li>
+    <li>First run with no file: the app returns <code>DEFAULT_CONFIG</code> in memory. The file materializes on the first <code>save_config()</code> (for example, settings dialog "Save").</li>
+  </ul>
+  <details>
+    <summary>Show full config schema (26 keys)</summary>
+    <table>
+      <tr><th>Key</th><th>Type</th><th>Default</th><th>Notes / validation</th></tr>
+      <tr><td><code>api_key</code></td><td>str</td><td><code>""</code></td><td>Google AI Studio key (<code>AIza…</code>). Logs show only a masked form (<code>_mask_key</code>).</td></tr>
+      <tr><td><code>audio_mode</code></td><td>str</td><td><code>"system"</code></td><td><code>"system"</code> (computer sound only) or <code>"dual"</code> (mic + system). Aliases normalize. <code>mic_enabled</code> derives from the mode.</td></tr>
+      <tr><td><code>mic_enabled</code></td><td>bool</td><td><code>False</code></td><td>Derived: <code>system → False</code>, <code>dual → True</code>. Ignored on read.</td></tr>
+      <tr><td><code>selected_mic_index</code></td><td>int | null</td><td><code>null</code></td><td>Mic device index (null = default).</td></tr>
+      <tr><td><code>selected_loopback_name</code></td><td>str</td><td><code>""</code></td><td>Substring match for the loopback device. Empty means auto-detect (system default output).</td></tr>
+      <tr><td><code>vad_threshold_db</code></td><td>int</td><td><code>120</code></td><td>Linear abs-mean energy threshold. Clamped to <strong>50–2000</strong>.</td></tr>
+      <tr><td><code>save_transcript_locally</code></td><td>bool</td><td><code>True</code></td><td>Appends model text to <code>transcripts/session_*.md</code>.</td></tr>
+      <tr><td><code>font_size</code></td><td>int</td><td><code>14</code></td><td>HUD font. Clamped to <strong>8–28</strong>.</td></tr>
+      <tr><td><code>hud_opacity</code></td><td>float</td><td><code>0.85</code></td><td>HUD opacity. Clamped to <strong>0.30–1.00</strong>.</td></tr>
+      <tr><td><code>model</code></td><td>str</td><td><code>"gemini-3.8-live"</code></td><td>Primary Live model. Live-capable only (see fallback chain).</td></tr>
+      <tr><td><code>fallback_model</code></td><td>str</td><td><code>"gemini-3.1-flash-live-preview"</code></td><td>1st fallback (deduped vs. primary).</td></tr>
+      <tr><td><code>ultimate_fallback_model</code></td><td>str</td><td><code>"gemini-2.5-flash-native-audio-preview-12-2025"</code></td><td>2nd fallback. The client then tries 4 hardcoded known-good ids.</td></tr>
+      <tr><td><code>summarizer_model</code></td><td>str</td><td><code>"gemini-3.5-flash-lite"</code></td><td>generateContent-only summarizer (NOT Live-capable).</td></tr>
+      <tr><td><code>thinking_level</code></td><td>str</td><td><code>"MINIMAL"</code></td><td>MINIMAL / LOW / MEDIUM / HIGH → SDK <code>ThinkingConfig</code>. EXTENDED / MAX / ULTRA normalize to HIGH.</td></tr>
+      <tr><td><code>difficulty_level</code></td><td>str</td><td><code>"EASY"</code></td><td>EASY / MEDIUM / HARD / EXPERT prompt mapping (<code>DIFFICULTY_PROMPTS</code>). Aliases normalize (HIGH → HARD, ULTRA → EXPERT, …).</td></tr>
+      <tr><td><code>target_role</code></td><td>str</td><td><code>""</code></td><td>Injected as "Candidate context: target role: …".</td></tr>
+      <tr><td><code>target_company</code></td><td>str</td><td><code>""</code></td><td>Injected as "Candidate context: target company: …".</td></tr>
+      <tr><td><code>system_instruction</code></td><td>str</td><td>(long default)</td><td>Elite-copilot prompt (one shared system-audio stream, brevity, text-only). Retired defaults auto-migrate. Custom text stays untouched.</td></tr>
+      <tr><td><code>enable_knowledge</code></td><td>bool</td><td><code>False</code></td><td>Injects local files into the instruction at session start.</td></tr>
+      <tr><td><code>knowledge_paths</code></td><td>list[str]</td><td><code>[]</code></td><td>Files and/or folders. Recursive walk. A string coerces to a single-item list.</td></tr>
+      <tr><td><code>knowledge_max_chars</code></td><td>int</td><td><code>12000</code></td><td>Truncation budget. Clamped to <strong>1000–60000</strong>.</td></tr>
+      <tr><td><code>enable_web_search</code></td><td>bool</td><td><code>False</code></td><td>Registers the <code>web_search</code> function tool on the Live session.</td></tr>
+      <tr><td><code>web_max_results</code></td><td>int</td><td><code>5</code></td><td>Clamped to <strong>1–10</strong>.</td></tr>
+      <tr><td><code>hud_auto_resize</code></td><td>bool</td><td><code>True</code></td><td>HUD grows with content.</td></tr>
+      <tr><td><code>stealth_hide_from_capture</code></td><td>bool</td><td><code>True</code></td><td>Applies <code>WDA_EXCLUDEFROMCAPTURE</code> on show. The pill shows live on/off state.</td></tr>
+      <tr><td><code>selftest_hello</code></td><td>bool</td><td><code>True</code></td><td>One-line hello on first connect (proves the text path; ≤3 attempts).</td></tr>
+    </table>
+  </details>
+  <div class="callout">
+    <strong><code>config.json</code> is a secret file.</strong> It holds the live API key in plaintext. <code>.gitignore</code> lists it. It ships next to the exe, not inside it. Redact it before you share logs or diagnostics.
+  </div>
+</section>
+
+<!-- 08 SETTINGS -->
+<section id="settings">
+  <h2><span class="num">08</span>Settings tabs</h2>
+  <p>The settings dialog (dark QSS, centered on the main screen) collects everything in <code>DEFAULT_CONFIG</code> across 5 tabs. It offers <strong>Save</strong>, <strong>Save &amp; Launch</strong> (emits <code>launch_requested</code>), and <strong>Cancel</strong>. Device combos populate asynchronously (8 s timeout) with a refresh button.</p>
+  <table>
+    <tr><th>Tab</th><th>Controls</th><th>Maps to</th></tr>
+    <tr><td><strong>API &amp; Model</strong></td><td>API key (password field + Show toggle), Live model combo, fallback model combo, summarizer combo, reasoning-depth combo + tip, difficulty combo + tip, target role, company, transcript checkbox.</td><td><code>api_key</code>, <code>model</code>, <code>fallback_model</code>, <code>summarizer_model</code>, <code>thinking_level</code>, <code>difficulty_level</code>, <code>target_role</code>, <code>target_company</code>, <code>save_transcript_locally</code></td></tr>
+    <tr><td><strong>Audio (auto)</strong></td><td>Source radios (Computer sound only / Mic + computer sound), mic combo, system-sound (loopback) combo, audio status label, sensitivity slider, refresh button.</td><td><code>audio_mode</code>, <code>selected_mic_index</code>, <code>selected_loopback_name</code>, <code>vad_threshold_db</code></td></tr>
+    <tr><td><strong>Knowledge &amp; Search</strong></td><td>Enable-knowledge checkbox, path list (Add files / Add folder / Remove / Clear), max-chars spin, enable-web-search checkbox, max-results spin. Note: "Free unlimited DuckDuckGo, no key, no browser."</td><td><code>enable_knowledge</code>, <code>knowledge_paths</code>, <code>knowledge_max_chars</code>, <code>enable_web_search</code>, <code>web_max_results</code></td></tr>
+    <tr><td><strong>Prompt &amp; HUD</strong></td><td>System-instruction editor, font spin, opacity slider, auto-resize checkbox, Reset-to-Default prompt button.</td><td><code>system_instruction</code>, <code>font_size</code>, <code>hud_opacity</code>, <code>hud_auto_resize</code></td></tr>
+    <tr><td><strong>Controls</strong></td><td>Hotkey legend plus stealth / click-through descriptions (also shown in the HUD).</td><td>— (reference only; the HUD applies <code>stealth_hide_from_capture</code>)</td></tr>
+  </table>
+  <h3>Global hotkeys (Ctrl+Alt+…)</h3>
+  <table>
+    <tr><th>Keys</th><th>Action</th></tr>
+    <tr><td><code>H</code></td><td>Hide / show HUD</td></tr>
+    <tr><td><code>C</code></td><td>Clear HUD text</td></tr>
+    <tr><td><code>P</code></td><td>Pause / resume audio streaming</td></tr>
+    <tr><td><code>T</code></td><td>Toggle click-through</td></tr>
+    <tr><td><code>Q</code></td><td>Quit (hard exit)</td></tr>
+  </table>
+</section>
+
+<!-- 09 FAILURES -->
+<section id="failures">
+  <h2><span class="num">09</span>Failure modes &amp; retries</h2>
+  <table>
+    <tr><th>Failure</th><th>Detection</th><th>Response</th></tr>
+    <tr><td>No system-audio device</td><td>Pre-flight loopback query (10 s timeout) + mixer status watcher</td><td>Warning dialog once. HUD keeps retrying. Live connection stays up. The health ticker posts the device error to the HUD once.</td></tr>
+    <tr><td>Device enumeration hangs (WASAPI/PortAudio)</td><td>Executor plus <code>future.result(timeout)</code></td><td>Settings tab continues with an empty list and a "Scanning…" / "query timed out" label. Diag reports <code>["&lt;query TIMED OUT …&gt;"]</code>.</td></tr>
+    <tr><td>Model / session fails</td><td>Exception in <code>_run_session</code>. Websocket close codes (1000/1001/1007/1008) in <code>_produce</code>.</td><td>Try the next candidate in the fallback chain. The working model becomes sticky. Transient send hiccups keep the session alive (log only).</td></tr>
+    <tr><td>Repeated failures</td><td>Per-model exception, outer loop</td><td>Exponential backoff: 2 s × 1.6, capped at 30 s. Throttled HUD notice ("[connection issue: …]", ≤1 per 5 s).</td></tr>
+    <tr><td>Long-lived session drift</td><td><code>_watch_stop</code> monotonic deadline</td><td>Proactive recycle every 10 min (min 120 s) with an immediate reconnect and a "[refreshing session for speed…]" note.</td></tr>
+    <tr><td>Self-test hello unanswered</td><td>Receive counter vs. baseline after send</td><td>Reset the hello flag. Retry on the next session (max 3 attempts). No crash, no hang.</td></tr>
+    <tr><td>Queue pressure</td><td><code>queue.full()</code> on put</td><td>Drop the oldest frame or marker. Keep latency bounded. Never block the audio thread.</td></tr>
+    <tr><td>Web search tool failure</td><td>httpx / DuckDuckGo errors</td><td>The tool returns a <code>"Search failed: …"</code> string. The model answers from its own knowledge. It never raises.</td></tr>
+    <tr><td>Knowledge load failure</td><td>Scandir/read errors, empty result</td><td>Warn plus an "enabled but empty — check paths" summary. The session starts without knowledge.</td></tr>
+    <tr><td>Corrupt / missing <code>config.json</code></td><td><code>JSONDecodeError</code>, non-dict, missing file</td><td>Fall back to <code>DEFAULT_CONFIG</code>. Validation clamps out-of-range values at load.</td></tr>
+    <tr><td>No API key</td><td><code>api_key == ""</code> at <code>run()</code>, <code>--auto</code> check</td><td>The client raises a clear <code>RuntimeError</code> ("Set it in the Settings dialog"). <code>--auto</code> prints a warning. The HUD shows disconnected.</td></tr>
+    <tr><td>Hotkey / pynput missing</td><td>Import or <code>GlobalHotKeys</code> failure</td><td>Hotkeys disable with a logged warning. The rest of the app stays unaffected.</td></tr>
+  </table>
+  <div class="callout">
+    <strong>Error throttling.</strong> Connection errors show on the HUD at most once per 5 seconds. Silent infinite spin is a bug. Spam is a bug too.
+  </div>
+</section>
+
+<!-- 10 BUILD -->
+<section id="build">
+  <p class="eyebrow">Ship</p>
+  <h2><span class="num">10</span>Build &amp; deployment</h2>
+  <h3>onedir vs onefile</h3>
+  <table>
+    <tr><th></th><th>onedir (default)</th><th>onefile</th></tr>
+    <tr><td>Command</td><td><code>python build_exe.py</code></td><td><code>python build_exe.py --onefile</code></td></tr>
+    <tr><td>Output</td><td><code>dist\InterviewCopilot\InterviewCopilot.exe</code> plus DLLs and data beside it</td><td><code>dist\InterviewCopilot.exe</code> (single file)</td></tr>
+    <tr><td>Startup</td><td>Fast (no unpack). Recommended for testing.</td><td>Slow (unpacks on every launch)</td></tr>
+    <tr><td>Distribution</td><td>Ship the whole folder, or wrap it with Inno Setup (see below).</td><td>Single file, easiest to copy. Share <code>config.json</code> separately.</td></tr>
+    <tr><td><code>--diag</code> output</td><td colspan="2">Default builds are <strong>windowed</strong> (no console). <code>--diag</code> text stays invisible. Build with <code>python build_exe.py --console</code> to keep a console window.</td></tr>
+  </table>
+  <h3>What <code>build_exe.py</code> does (audited)</h3>
+  <ol>
+    <li>Resolves paths from <code>__file__</code>, not cwd. The script works from any working directory. <code>main.py</code>, <code>app_icon.ico</code>, and <code>version_info.txt</code> use absolute paths.</li>
+    <li>Verifies the entry point exists. Exits with code <code>2</code> and a plain-English hint when it does not. Verifies PyInstaller imports under <em>this</em> interpreter. Exits <code>2</code> with the exact <code>pip install</code> command when it does not.</li>
+    <li>Writes <code>version_info.txt</code> from the embedded <code>VERSION_INFO_TXT</code> (1.0.0, CompanyName = InterviewCopilot — never impersonates a system binary) and passes <code>--version-file</code> on Windows.</li>
+    <li>Passes <strong>hidden imports</strong> for every local module plus the native or optional deps PyInstaller misses (<code>PySide6.*</code>, <code>shiboken6</code>, <code>sounddevice</code>, <code>soundcard</code>, <code>google.genai(.types)</code>, <code>httpx</code>, <code>pypdf</code>, <code>pynput.*_win32</code>), plus <code>--collect-all</code> for the audio libs and the <code>google</code> package.</li>
+    <li><strong>Excludes the other Qt bindings</strong> (<code>PySide2</code>, <code>shiboken2</code>, <code>PyQt5</code>, <code>PyQt6(.QtWebEngine)</code>) — never PySide6. App code imports PySide6 exclusively (verified by grep; the only "PyQt" mentions are comments and excludes).</li>
+    <li>Passes <code>--icon</code> only when <code>app_icon.ico</code> exists (present, ~17 KB). Warns instead of silently skipping when it is missing.</li>
+    <li>Reports the <em>correct</em> output path per mode (onedir → inside the folder, onefile → the single exe) and reminds you to ship <code>config.json</code> alongside.</li>
+  </ol>
+  <h3>Spec &amp; installer artifacts</h3>
+  <p><code>InterviewCopilot.spec</code> is <strong>generated, not edited</strong>. PyInstaller rewrites it in the project root on every build, and its absolute paths tie it to one machine. The repo keeps it only as a record of the last build settings (onedir, windowed, <code>console=False</code>, icon plus version file). Compile <code>installer.iss</code> manually with Inno Setup 6 after a build. Bump its <code>MyAppVersion 1.0.0</code> in step with <code>build_exe.VERSION_INFO_TXT</code> and <code>version_info.txt</code>.</p>
+  <h3>config.json shipping rules</h3>
+  <ul>
+    <li>Never bake a real key into the exe image. <code>config.json</code> travels next to the exe (onedir folder or beside the onefile exe).</li>
+    <li>First run without it: defaults apply. The file materializes on Save.</li>
+    <li>It is <code>.gitignore</code>d (with <code>.env</code> variants). Redact before you post logs.</li>
+  </ul>
+  <h3>Requirements (<code>requirements.txt</code>)</h3>
+  <div class="codewrap"><pre>PySide6&gt;=6.6        # ONLY Qt binding — do NOT add PyQt6
+numpy&gt;=1.26
+sounddevice&gt;=0.4.6
+soundcard&gt;=0.4.2
+google-genai&gt;=1.0.0
+pynput&gt;=1.7.6
+httpx&gt;=0.27
+pypdf&gt;=4.0
+pyinstaller&gt;=6.0
+
+# --- Dev / test only (install separately; NOT required at runtime) ---
+# pytest&gt;=7
+# Install with:  python -m pip install pytest</pre></div>
+  <p class="muted">Verified against the code: every import in the app resolves to one of these pins (stdlib aside). Known environmental note: the dev machine also has PyQt6 6.11 installed as a side effect of other work. The app and build never import it. The build explicitly excludes it. It does not affect the bundle.</p>
+</section>
+
+<!-- 11 TESTING -->
+<section id="testing">
+  <h2><span class="num">11</span>Testing strategy</h2>
+  <p>Tests run headless. They need no audio hardware, no network, and no GUI event loop. <code>QT_QPA_PLATFORM=offscreen</code> is set before any PySide6 import. The one test that touches <code>QApplication</code> (the <code>--auto</code> route) runs without a display. <code>import main</code> stays safe: PySide6 widgets import only inside functions.</p>
+  <h3>Automated (<code>tests/</code>, 26 tests)</h3>
+  <table>
+    <tr><th>File</th><th>What is covered</th></tr>
+    <tr><td><code>tests/test_build.py</code> (13 tests)</td><td>Build constants plus Python exists on disk. Every local module (and every top-level <code>.py</code> minus the entry script) is in <code>HIDDEN_IMPORTS</code>. PySide6-only (no <code>PyQt*</code>). Version-info key fields plus no system-binary impersonation. <code>ensure_version_info</code> round-trip. Requirements min-version pins plus no PyQt. CLI matrix (onedir/onefile, console, no-clean) with <code>subprocess</code> mocked — hidden-import, exclude, collect-all, and icon flags asserted from the captured command line. <code>main()</code> arg parsing.</td></tr>
+    <tr><td><code>tests/test_main.py</code> (13 tests)</td><td><code>import main</code> creates no <code>QApplication</code>. <code>DIFFICULTY_PROMPTS</code> shape (4 levels, "Difficulty:" marker). <code>_mask_key</code> (empty/short/long, full key never leaks). <code>_enrich_instruction</code> (speaker protocol plus difficulty, idempotent, unknown-difficulty fallback, dual-mode protocol, candidate context). <code>--diag</code> and <code>--auto</code> routing via mocked <code>run_diag</code> / <code>run_hud_session</code>. Unknown flags exit non-zero.</td></tr>
+  </table>
+  <h3>Static &amp; smoke</h3>
+  <table>
+    <tr><th>Command</th><th>Purpose</th><th>Expected</th></tr>
+    <tr><td><code>python -m py_compile build_exe.py main.py tests/test_build.py tests/test_main.py</code></td><td>Syntax gate for everything this deliverable touches.</td><td>Exit 0.</td></tr>
+    <tr><td><code>python -m pytest tests/test_build.py tests/test_main.py -v</code></td><td>Behavioral gate.</td><td>26 passed.</td></tr>
+    <tr><td><code>python main.py --diag</code></td><td>Live + audio smoke (needs a real API key plus an output device).</td><td><code>RESULT: PASS</code>. The 60 s probe shows <code>[diag] STATUS: active</code> plus the hello reply.</td></tr>
+    <tr><td>Frozen <code>--console</code> exe + <code>--diag</code></td><td>End-to-end packaging smoke.</td><td>HUD appears, text streams, no dialogs about missing modules.</td></tr>
+  </table>
+  <div class="codewrap"><pre>python -m py_compile build_exe.py main.py tests/test_build.py tests/test_main.py
+python -m pytest tests/test_build.py tests/test_main.py -v
+python main.py --diag</pre></div>
+  <p class="muted">What is <em>not</em> covered (by design): real audio devices, the Live network handshake, and on-screen rendering. <code>--diag</code> plus manual smoke (see <code>DEPLOYMENT.md</code>) exercise those. They need hardware and a key. CI never runs them.</p>
+</section>
+
+<!-- 12 SECURITY -->
+<section id="security">
+  <h2><span class="num">12</span>Security notes</h2>
+  <h3>API key handling</h3>
+  <ul>
+    <li>The key lives <strong>only</strong> in <code>config.json</code> (plaintext, by necessity for a local desktop app). It is <code>.gitignore</code>d and never embedded in the exe.</li>
+    <li>Logs never print it. <code>_mask_key()</code> shows <code>AIza…90 (len=39)</code>-shaped fragments. <code>_log_launch_diagnostics()</code> reports only the <code>AIza</code> prefix check. Transcripts and the HUD never contain the key.</li>
+    <li>The settings key field uses <code>Password</code> echo-mode with an opt-in Show toggle. Rotate the key by editing <code>config.json</code> (or the dialog), then Save.</li>
+    <li>Atomic save (<code>.tmp</code> + <code>os.replace</code>) avoids half-written files when the process dies mid-write.</li>
+  </ul>
+  <h3>Stealth posture</h3>
+  <ul>
+    <li><code>WDA_EXCLUDEFROMCAPTURE</code> keeps the HUD out of screenshots and screen shares (needs Win10 2004+ / build 19041+). A pill in the HUD shows the live on/off state.</li>
+    <li>Click-through mode lets clicks pass through the HUD. <code>Ctrl+Alt+H</code> hides it instantly. This is user convenience, not OS-level invisibility. The process is a normal Windows app. It shows up in Task Manager and the taskbar.</li>
+    <li>Audio-only input: the app captures no screen pixels, takes no screenshots, and sends no pixels. The model hears computer sound (plus mic in dual mode) and returns text.</li>
+    <li>No telemetry. The app makes exactly two network calls: the Gemini Live session (key supplied) and the DuckDuckGo search HTML endpoint when the web tool is enabled.</li>
+  </ul>
+  <div class="callout">
+    <strong>Scope reminder.</strong> Real-time assistance in live interviews may violate the policies of the interviewer or event organizer. Stealth features reduce casual visibility. They do not make the activity comply with any given policy.
+  </div>
+</section>
+
+</div></main>
+
+<footer>
+  <p>InterviewCopilot · Architecture &amp; Deployment · Self-contained single-file document (no CDN, no external URLs)</p>
+  <p>Source as measured: Python 3.14.7 on Windows · Print: Ctrl+P (light print stylesheet included)</p>
+  <p id="verified">Last verified: 2026-11-06</p>
+</footer>
+
+<script>
+var RM = matchMedia('(prefers-reduced-motion: reduce)').matches;
+if (!RM) document.documentElement.style.scrollBehavior = 'smooth';
+var links = document.querySelectorAll('nav.toc a[href^="#"]');
+var spy = new IntersectionObserver(function(es){
+  es.forEach(function(e){
+    if (e.isIntersecting) links.forEach(function(a){
+      a.classList.toggle('active', a.getAttribute('href') === '#' + e.target.id);
+    });
+  });
+}, {rootMargin: '-40% 0px -55% 0px'});
+document.querySelectorAll('section').forEach(function(s){ spy.observe(s); });
+document.querySelectorAll('.node').forEach(function(n){
+  n.addEventListener('click', function(){
+    var t = document.getElementById(n.getAttribute('data-t'));
+    if (!t) return;
+    t.scrollIntoView({behavior: RM ? 'auto' : 'smooth', block: 'start'});
+    t.classList.add('flash');
+    setTimeout(function(){ t.classList.remove('flash'); }, 1400);
+  });
+});
+document.querySelectorAll('pre').forEach(function(p){
+  var w = p.parentElement, b = document.createElement('button');
+  b.className = 'copybtn'; b.textContent = 'Copy';
+  w.appendChild(b);
+  b.addEventListener('click', function(){
+    navigator.clipboard.writeText(p.innerText).then(function(){
+      b.textContent = 'Copied'; setTimeout(function(){ b.textContent = 'Copy'; }, 1500);
+    });
+  });
+});
+document.getElementById('verified').textContent =
+  'Last verified: ' + new Date().toISOString().slice(0, 10);
+</script>
+</body>
+</html>

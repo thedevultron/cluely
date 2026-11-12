@@ -130,29 +130,44 @@ def _log_launch_diagnostics(config: dict) -> None:
         log.debug("diag block failed: %s", e)
 
 
+FAST_PROMPTS = {
+    "EASY": "Fast reply: 1 line/bullet, max 40 words. Single instant answer only.",
+    "MEDIUM": "Fast reply: 2 bullets, max 80 words. Two instant bullets only.",
+    "HARD": "Fast reply: 3 bullets, max 150 words. Three instant bullets only.",
+    "EXPERT": "Fast reply: 4 bullets, max 250 words. Four instant bullets only.",
+}
+
 DIFFICULTY_PROMPTS = {
     "EASY": (
-        "\n\nDifficulty: EASY — explain simply, short bullets, beginner-friendly, "
-        "avoid jargon, give the most obvious working approach first."
+        "\n\nDifficulty: EASY — 1 line/bullet, max 40 words, simple, "
+        "no jargon, obvious approach first."
     ),
     "MEDIUM": (
-        "\n\nDifficulty: MEDIUM — balanced concise bullets: approach, complexity, "
-        "edge cases, 2-4 lines of key code when needed."
+        "\n\nDifficulty: MEDIUM — 2 bullets, max 80 words, "
+        "approach + complexity/edge case only."
     ),
     "HARD": (
-        "\n\nDifficulty: HARD — dense expert hints: optimal algorithm + proof sketch, "
-        "exact complexity, tricky edge cases, trade-offs, minimal but precise code."
+        "\n\nDifficulty: HARD — 3 bullets, max 150 words, "
+        "optimal algorithm + complexity + edge cases."
     ),
     "EXPERT": (
-        "\n\nDifficulty: EXPERT — maximum depth, system-design grade: optimal approach, "
-        "alternatives with trade-offs, bottlenecks, failure modes, edge cases, "
-        "and production pitfalls. Still concise bullets."
+        "\n\nDifficulty: EXPERT — 4 bullets, max 250 words, "
+        "optimal + trade-offs + pitfalls."
     ),
 }
 
 
 def _enrich_instruction(config: dict) -> str:
     base = str(config.get("system_instruction", ""))
+    # Truncate raw system_instruction at 2000 chars before enrichment (old prompts
+    # can be ~1500 chars; marker + difficulty + fast reply must stay <2500 total).
+    # Skip when already enriched so a second call stays idempotent.
+    if (
+        "Speaker protocol" not in base
+        and "Audio source" not in base
+        and len(base) > 2000
+    ):
+        base = base[:2000]
     try:
         mode = str(config.get("audio_mode", "system") or "system").lower()
     except Exception:
@@ -179,7 +194,7 @@ def _enrich_instruction(config: dict) -> str:
         base = base + marker_help
     # Difficulty ALWAYS applies via prompt (works on every model).
     try:
-        diff = str(config.get("difficulty_level", "MEDIUM") or "MEDIUM").strip().upper()
+        diff = str(config.get("difficulty_level", "EASY") or "EASY").strip().upper()
         if diff not in DIFFICULTY_PROMPTS:
             diff = "MEDIUM"
         if "Difficulty:" not in base:
@@ -187,9 +202,17 @@ def _enrich_instruction(config: dict) -> str:
     except Exception:
         pass
     try:
+        if "Reply within 2s" not in base:
+            base += (
+                "\n\nReply within 2s, first token immediate, no preamble, "
+                "no hedging, number/bullet only."
+            )
+    except Exception:
+        pass
+    try:
         role = str(config.get("target_role", "") or "").strip()
         company = str(config.get("target_company", "") or "").strip()
-        if role or company:
+        if (role or company) and "Candidate context:" not in base:
             line = "\n\nCandidate context:"
             if role:
                 line += f" target role: {role}."
@@ -214,10 +237,11 @@ def _enrich_instruction(config: dict) -> str:
                 ctx = ""
                 files = []
             if ctx and ctx.strip():
-                base += (
-                    "\n\nLocal knowledge base (candidate's materials "
-                    "— prioritize when relevant):\n" + ctx
-                )
+                if "Local knowledge base" not in base:
+                    base += (
+                        "\n\nLocal knowledge base (candidate's materials "
+                        "— prioritize when relevant):\n" + ctx
+                    )
                 log.info("Knowledge injected: %d file(s), %d chars", len(files), len(ctx))
                 config["_knowledge_summary"] = f"{len(files)} file(s), {len(ctx)} chars"
             else:
@@ -225,6 +249,9 @@ def _enrich_instruction(config: dict) -> str:
                 config["_knowledge_summary"] = "enabled but empty — check paths"
     except Exception as e:
         log.debug("knowledge enrich skipped: %s", e)
+    # Final length guard: keep total < 2500 chars (server context budget).
+    if len(base) >= 2500:
+        base = base[:2499]
     return base
 
 
@@ -252,7 +279,7 @@ def run_hud_session(config: dict) -> int:
     engine = AudioEngine(
         mic_index=config.get("selected_mic_index"),
         loopback_name=str(config.get("selected_loopback_name", "")),
-        vad_threshold_db=int(config.get("vad_threshold_db", 300)),
+        vad_threshold_db=int(config.get("vad_threshold_db", 120)),
         mic_enabled=bool(config.get("mic_enabled", config.get("audio_mode", "system") == "dual")),
         audio_mode=str(config.get("audio_mode", "system") or "system"),
     )
@@ -418,9 +445,13 @@ def run_hud_session(config: dict) -> int:
         audio_queue=engine.output_queue,
         fallback_models=[f for f in fallbacks if f],
         speaker_queue=engine.speaker_queue,
-        thinking_level=str(config.get("thinking_level", "HIGH")),
+        thinking_level=str(config.get("thinking_level", "MINIMAL") or "MINIMAL"),
         summarizer_model=str(config.get("summarizer_model", "gemini-3.5-flash-lite")),
         selftest_hello=bool(config.get("selftest_hello", True)),
+    )
+    log.info(
+        "thinking_level=%s (MINIMAL for speed; non-extended models ignore thinking)",
+        common_kwargs.get("thinking_level"),
     )
     try:
         client = GeminiLiveClient(
@@ -458,7 +489,7 @@ def run_hud_session(config: dict) -> int:
     except Exception:
         pass
 
-    # Console stats ticker (for `py main.py` feedback): audio + Live counters every 10s.
+    # Console stats ticker (for `py main.py` feedback): audio + Live counters every 5s.
     # Plus a ONE-TIME HUD line telling the user whether audio is actually flowing.
     try:
         _flow_reported = {"done": False}
@@ -492,7 +523,7 @@ def run_hud_session(config: dict) -> int:
             except Exception as e:
                 log.debug("stats tick failed: %s", e)
         _stats = QTimer()
-        _stats.setInterval(10_000)
+        _stats.setInterval(5_000)
         _stats.timeout.connect(_stats_tick)
         _stats.start()
         QTimer.singleShot(12_000, _stats_tick)
@@ -505,9 +536,9 @@ def run_hud_session(config: dict) -> int:
         def _welcome():
             try:
                 mode = str(config.get("audio_mode", "system"))
-                diff = str(config.get("difficulty_level", "MEDIUM"))
+                diff = str(config.get("difficulty_level", "EASY"))
                 model = str(config.get("model", ""))
-                think = str(config.get("thinking_level", "HIGH"))
+                think = str(config.get("thinking_level", "MINIMAL"))
                 lines = [f"Ready — {mode} audio → {model} (text-only) • Difficulty {diff} • Reasoning {think}"]
                 ks = str(config.get("_knowledge_summary", "") or "")
                 if bool(config.get("enable_knowledge", False)):
@@ -542,7 +573,7 @@ def run_hud_session(config: dict) -> int:
     except Exception:
         pass
 
-    # periodic flash-lite summarizer: every 5 min distill context to HUD + transcript
+    # periodic flash-lite summarizer: every 10 min distill context to HUD + transcript
     def _summarize_tick() -> None:
         try:
             if not recent_text or "loop" not in gemini_loop:
@@ -570,7 +601,7 @@ def run_hud_session(config: dict) -> int:
             log.debug("summarize tick failed: %s", e)
 
     timer = QTimer()
-    timer.setInterval(300_000)
+    timer.setInterval(600_000)
     timer.timeout.connect(_summarize_tick)
     timer.start()
 
@@ -672,7 +703,7 @@ def run_diag() -> int:
         eng = AudioEngine(
             mic_index=config.get("selected_mic_index"),
             loopback_name=str(config.get("selected_loopback_name", "")),
-            vad_threshold_db=int(config.get("vad_threshold_db", 300)),
+            vad_threshold_db=int(config.get("vad_threshold_db", 120)),
             mic_enabled=False,
             audio_mode="system",
         )

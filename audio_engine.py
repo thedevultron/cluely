@@ -6,6 +6,7 @@ import logging
 import queue
 import threading
 import time
+from collections import deque
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -14,6 +15,14 @@ log = logging.getLogger("cluely.audio")
 
 TARGET_RATE = 16000
 CHUNK_SAMPLES = 1024  # ~64ms @16kHz
+# Latency / VAD tuning exposed for tests and diagnostics.
+VAD_DEFAULT = 300  # linear abs-mean int16 threshold (legacy *_db name)
+VAD_MIN = 50
+VAD_MAX = 2000
+HANGOVER_FRAMES = 2  # ~128ms trailing audio after speech ends
+PREROLL_SAMPLES = 4800  # ~300ms @16kHz (>=3200 = 200ms onset protection)
+AGC_TARGET_RMS = 1000.0
+AGC_MAX_GAIN = 8.0
 
 try:
     import sounddevice as sd
@@ -53,7 +62,12 @@ def list_microphones() -> List[Tuple[int, str]]:
 
 def _ensure_com() -> bool:
     """CoInitialize the calling thread for WASAPI/COM calls. Returns True if
-    this call owns a COM ref (caller must CoUninitialize). Never raises."""
+    this call owns a COM ref (caller must CoUninitialize). Never raises.
+
+    S_OK (0) and S_FALSE (1) both obtain a reference that must be balanced
+    with CoUninitialize (even when already initialized). Other HRESULTs
+    (e.g. RPC_E_CHANGED_MODE) mean no ref was taken.
+    """
     try:
         import ctypes
         ole = ctypes.windll.ole32
@@ -63,7 +77,10 @@ def _ensure_com() -> bool:
         except Exception:
             pass
         rc = ole.CoInitialize(None)
-        return int(rc) == 0  # S_OK: we initialized; S_FALSE(1): already init
+        try:
+            return int(rc) in (0, 1)
+        except Exception:
+            return False
     except Exception:
         return False
 
@@ -131,9 +148,29 @@ def detect_system_audio(preferred: str = "") -> tuple[str, List[str]]:
 
 def _resample_mono(data: np.ndarray, src_rate: int, dst_rate: int = TARGET_RATE) -> np.ndarray:
     """Resample float32/int16 mono to dst_rate. Fallback linear interp."""
-    if data.size == 0:
+    try:
+        if data is None:
+            return np.zeros(0, dtype=np.float32)
+    except Exception:
         return np.zeros(0, dtype=np.float32)
-    arr = np.asarray(data, dtype=np.float32).ravel()
+    try:
+        if data.size == 0:
+            return np.zeros(0, dtype=np.float32)
+    except Exception:
+        pass
+    try:
+        arr = np.asarray(data, dtype=np.float32).ravel()
+    except Exception:
+        return np.zeros(0, dtype=np.float32)
+    if arr.size == 0:
+        return np.zeros(0, dtype=np.float32)
+    try:
+        src_rate = int(src_rate)
+        dst_rate = int(dst_rate)
+    except Exception:
+        return arr
+    if src_rate <= 0 or dst_rate <= 0:
+        return arr
     if src_rate == dst_rate:
         return arr
     try:
@@ -149,7 +186,15 @@ def _resample_mono(data: np.ndarray, src_rate: int, dst_rate: int = TARGET_RATE)
 def _to_mono(frame) -> np.ndarray:
     """Average multi-channel frame to mono float32."""
     try:
+        if frame is None:
+            return np.zeros(0, dtype=np.float32)
+    except Exception:
+        return np.zeros(0, dtype=np.float32)
+    try:
         arr = np.asarray(frame, dtype=np.float32)
+        # np.asarray(None, float32) -> 0-d nan; treat scalar/None as empty.
+        if arr.ndim == 0:
+            return np.zeros(0, dtype=np.float32)
         if arr.ndim == 2:
             return arr.mean(axis=1).astype(np.float32)
         return arr.ravel().astype(np.float32)
@@ -157,9 +202,29 @@ def _to_mono(frame) -> np.ndarray:
         return np.zeros(0, dtype=np.float32)
 
 
+def _truncate_to_int16_len(buf: bytes) -> bytes:
+    """Drop a trailing odd byte so frombuffer(..., int16) never raises."""
+    try:
+        if not buf:
+            return b""
+        n = len(buf) - (len(buf) % 2)
+        if n == 0:
+            return b""
+        if n == len(buf):
+            return bytes(buf)
+        return bytes(buf[:n])
+    except Exception:
+        try:
+            return bytes(buf) if buf else b""
+        except Exception:
+            return b""
+
+
 def mix_audio_frames(mic_chunk: bytes, loopback_chunk: bytes) -> bytes:
     """Mix two int16 mono byte buffers with clipping."""
     try:
+        mic_chunk = _truncate_to_int16_len(mic_chunk) if mic_chunk else b""
+        loopback_chunk = _truncate_to_int16_len(loopback_chunk) if loopback_chunk else b""
         a = np.frombuffer(mic_chunk, dtype=np.int16).astype(np.float32) if mic_chunk else np.zeros(0, dtype=np.float32)
         b = np.frombuffer(loopback_chunk, dtype=np.int16).astype(np.float32) if loopback_chunk else np.zeros(0, dtype=np.float32)
         n = max(len(a), len(b))
@@ -176,8 +241,37 @@ def mix_audio_frames(mic_chunk: bytes, loopback_chunk: bytes) -> bytes:
         return mic_chunk or loopback_chunk or b""
 
 
+def _safe_energy(v) -> float:
+    try:
+        f = float(v)
+    except Exception:
+        return 0.0
+    # NaN / +-inf are not speech energy; clamp negatives (abs-mean is >=0).
+    try:
+        import math as _m
+        if _m.isnan(f) or _m.isinf(f):
+            return 0.0
+    except Exception:
+        pass
+    return f if f > 0.0 else 0.0
+
+
+def _safe_threshold(v) -> float:
+    try:
+        import math as _m
+        f = float(v)
+        if _m.isnan(f) or _m.isinf(f):
+            return 300.0
+        return f if f >= 0.0 else 0.0
+    except Exception:
+        return 300.0
+
+
 def classify_speaker(mic_energy: float, lb_energy: float, threshold: float) -> str:
     """Lightweight dual-energy diarization. Returns interviewer/candidate/silence/both."""
+    mic_energy = _safe_energy(mic_energy)
+    lb_energy = _safe_energy(lb_energy)
+    threshold = _safe_threshold(threshold)
     mic_active = mic_energy >= threshold
     lb_active = lb_energy >= threshold
     if not mic_active and not lb_active:
@@ -216,10 +310,11 @@ class AudioEngine:
         self,
         mic_index: Optional[int] = None,
         loopback_name: str = "",
-        vad_threshold_db: int = 300,
+        vad_threshold_db: int = VAD_DEFAULT,
         chunk_samples: int = CHUNK_SAMPLES,
         mic_enabled: bool = False,
         audio_mode: str = "system",
+        enable_agc: bool = True,
     ) -> None:
         mode = str(audio_mode or "system").strip().lower()
         if mode in ("loopback", "computer"):
@@ -233,12 +328,39 @@ class AudioEngine:
             mic_enabled = True
         self.audio_mode = mode
         self.mic_enabled = bool(mic_enabled)
-        self.mic_index = mic_index
-        self.loopback_name = (loopback_name or "").strip()
-        self.vad_threshold = int(vad_threshold_db)
-        self.chunk_samples = int(chunk_samples)
+        try:
+            if mic_index is None:
+                self.mic_index = None
+            else:
+                self.mic_index = int(mic_index)
+        except (TypeError, ValueError, OverflowError):
+            self.mic_index = None
+        try:
+            self.loopback_name = str(loopback_name or "").strip()
+        except Exception:
+            self.loopback_name = ""
+        # Legacy param name is *_db but value is a linear abs-mean threshold;
+        # clamp identically to set_vad_threshold() so init never crashes or
+        # accepts absurd values (negative / huge / NaN).
+        try:
+            _vad = int(vad_threshold_db)
+        except (TypeError, ValueError, OverflowError):
+            _vad = 300
+        try:
+            self.vad_threshold = max(VAD_MIN, min(VAD_MAX, _vad))
+        except Exception:
+            self.vad_threshold = VAD_DEFAULT
+        try:
+            _cs = int(chunk_samples)
+        except (TypeError, ValueError, OverflowError):
+            _cs = CHUNK_SAMPLES
+        if _cs <= 0:
+            _cs = CHUNK_SAMPLES
+        self.chunk_samples = max(64, min(16384, _cs))
         self.output_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=200)
         self.speaker_queue: "queue.Queue[str]" = queue.Queue(maxsize=50)
+        self._mic_buffer: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=50)
+        self._lifecycle_lock = threading.Lock()
         self._current_speaker = "silence"
         self._pending_speaker = "silence"
         self._pending_count = 0
@@ -252,9 +374,35 @@ class AudioEngine:
         self._paused = threading.Event()  # set() == paused
         self._threads: List[threading.Thread] = []
         self._mic_stream = None
-        self._latest_loopback = np.zeros(self.chunk_samples, dtype=np.float32)
+        # Rolling loopback buffer keeps >= PREROLL_SAMPLES (~300ms) so
+        # endpointing / speaker logic has onset context, not just the last
+        # 1024-sample chunk. Mixer consumes the last chunk_samples of it.
+        _buf_len = max(int(PREROLL_SAMPLES), int(self.chunk_samples))
+        # also keep at least 4 chunks of history when chunk is large
+        try:
+            _buf_len = max(_buf_len, int(self.chunk_samples) * 4)
+        except Exception:
+            pass
+        self._latest_loopback = np.zeros(_buf_len, dtype=np.float32)
         self._lb_lock = threading.Lock()
         self._running = False
+        # -- adaptive VAD / AGC state ------------------------------------
+        try:
+            self.enable_agc = bool(enable_agc)
+        except Exception:
+            self.enable_agc = True
+        self._agc_gain = 1.0
+        self._rms_window: "deque[float]" = deque(maxlen=8)  # ~500ms @64ms
+        self._rms_lock = threading.Lock()
+        self._peak = 0.0
+        self._last_speech_time = 0.0
+        self._in_speech = False
+        self._preroll_buf = np.zeros(0, dtype=np.float32)
+        self._preroll_lock = threading.Lock()
+        self._lb_silent_since: Optional[float] = None
+        self._lb_failover_count = 0
+        self._loopback_override = ""
+        self._need_failover = False
         # -- diagnostics (console meter + HUD flow line) ------------------
         self._stats_lock = threading.Lock()
         self.frames_sent = 0
@@ -295,6 +443,178 @@ class AudioEngine:
                     self.last_frame_time = time.time()
         except Exception:
             pass
+
+    # -- adaptive VAD / AGC ------------------------------------------------
+    def _note_rms(self, rms: float, peak: float = 0.0) -> None:
+        try:
+            r = float(rms)
+        except Exception:
+            return
+        try:
+            import math as _m
+            if _m.isnan(r) or _m.isinf(r) or r < 0:
+                return
+        except Exception:
+            pass
+        try:
+            with self._rms_lock:
+                if not hasattr(self, "_rms_window"):
+                    self._rms_window = deque(maxlen=8)  # type: ignore[assignment]
+                self._rms_window.append(float(r))
+                self._peak = max(float(peak), float(self._peak) * 0.9)
+        except Exception:
+            pass
+
+    def effective_threshold(self) -> float:
+        """Adaptive VAD threshold in [VAD_MIN, VAD_MAX].
+
+        Returns the configured base threshold, halved when recent (~500ms)
+        RMS history shows speech (peak window > base) or we are inside
+        speech. Lowering after speech onset keeps quiet meeting speech
+        above the gate instead of requiring it to clear a fixed 300 gap.
+        """
+        try:
+            base = float(getattr(self, "vad_threshold", VAD_DEFAULT))
+        except Exception:
+            base = float(VAD_DEFAULT)
+        base = max(float(VAD_MIN), min(float(VAD_MAX), base))
+        try:
+            now = time.monotonic()
+            last = float(getattr(self, "_last_speech_time", 0.0) or 0.0)
+            if last and (now - last) < 0.5 and bool(getattr(self, "_in_speech", False)):
+                return max(float(VAD_MIN), min(float(VAD_MAX), base * 0.5))
+            win = getattr(self, "_rms_window", None)
+            if win is not None and len(win) > 0:
+                try:
+                    if max(list(win)) > base:
+                        return max(float(VAD_MIN), min(float(VAD_MAX), base * 0.5))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return base
+
+    def _apply_agc(self, frame) -> np.ndarray:
+        """Normalize loopback gain (+AGC) so low-volume meetings pass VAD.
+
+        Boosts only quiet but non-silent signals toward TARGET RMS
+        (1000 int16 scale), capped at 8x and smoothed to avoid pumping.
+        True digital silence (peak ~0) is left untouched.
+        """
+        try:
+            arr = np.asarray(frame, dtype=np.float32).ravel()
+        except Exception:
+            try:
+                return np.asarray(frame, dtype=np.float32)
+            except Exception:
+                return np.zeros(0, dtype=np.float32)
+        try:
+            if not bool(getattr(self, "enable_agc", True)):
+                return arr
+        except Exception:
+            pass
+        try:
+            if arr.size == 0:
+                return arr
+            peak = float(np.max(np.abs(arr)))
+            if peak < 1.0:
+                return arr
+            rms = float(np.sqrt(np.mean(arr.astype(np.float32) ** 2)))
+            if rms < 1e-6 or peak < 1.0:
+                return arr
+            gain_raw = float(AGC_TARGET_RMS) / rms if rms > 1e-6 else 1.0
+            gain = max(1.0, min(float(AGC_MAX_GAIN), float(gain_raw)))
+            old = float(getattr(self, "_agc_gain", 1.0) or 1.0)
+            smoothed = 0.5 * old + 0.5 * gain
+            self._agc_gain = float(smoothed)
+            if smoothed <= 1.01:
+                return arr
+            return np.clip(arr * float(smoothed), -32767.0, 32767.0).astype(np.float32)
+        except Exception:
+            return arr
+
+    # -- pre-roll ----------------------------------------------------------
+    def _accumulate_preroll(self, frame) -> None:
+        try:
+            arr = np.asarray(frame, dtype=np.float32).ravel()
+            if arr.size == 0:
+                return
+            with self._preroll_lock:
+                if not hasattr(self, "_preroll_buf"):
+                    self._preroll_buf = np.zeros(0, dtype=np.float32)
+                buf = np.concatenate([self._preroll_buf, arr])
+                keep = int(max(int(PREROLL_SAMPLES), int(getattr(self, "chunk_samples", CHUNK_SAMPLES) or CHUNK_SAMPLES)))
+                if len(buf) > keep:
+                    buf = buf[-keep:]
+                self._preroll_buf = buf.astype(np.float32)
+        except Exception:
+            pass
+
+    def _take_preroll_pcm(self) -> List[bytes]:
+        """Drain buffered pre-roll as int16 PCM chunks (chunk_samples each)."""
+        out: List[bytes] = []
+        try:
+            cs = int(getattr(self, "chunk_samples", CHUNK_SAMPLES) or CHUNK_SAMPLES)
+            with self._preroll_lock:
+                if not hasattr(self, "_preroll_buf") or self._preroll_buf is None or len(self._preroll_buf) == 0:
+                    return out
+                buf = np.asarray(self._preroll_buf, dtype=np.float32).ravel()
+                self._preroll_buf = np.zeros(0, dtype=np.float32)
+            for i in range(0, len(buf), cs):
+                part = buf[i : i + cs]
+                if len(part) < cs:
+                    part = np.pad(part, (0, cs - len(part)))
+                pcm = np.clip(part, -32768, 32767).astype(np.int16).tobytes()
+                out.append(pcm)
+        except Exception:
+            pass
+        return out
+
+    def _enqueue_pcm(self, pcm: bytes) -> bool:
+        try:
+            if self.output_queue.full():
+                try:
+                    self.output_queue.get_nowait()
+                except queue.Empty:
+                    pass
+            self.output_queue.put_nowait(pcm)
+            return True
+        except queue.Full:
+            return False
+        except Exception:
+            return False
+
+    # -- loopback failover -------------------------------------------------
+    def _check_loopback_failover(self, energy: float, now: Optional[float] = None) -> bool:
+        """True when loopback energy has been ~0 for >5s (healthy recorder).
+
+        Called from the loopback record loop per chunk. Resets on any
+        non-silent chunk. Never raises; COM stays balanced by caller.
+        """
+        try:
+            if now is None:
+                now = time.monotonic()
+            try:
+                e = float(energy)
+            except Exception:
+                e = 0.0
+            try:
+                import math as _m
+                if _m.isnan(e) or _m.isinf(e):
+                    e = 0.0
+            except Exception:
+                pass
+            if e >= 1.0:
+                self._lb_silent_since = None
+                return False
+            if getattr(self, "_lb_silent_since", None) is None:
+                self._lb_silent_since = float(now)
+                return False
+            if (float(now) - float(self._lb_silent_since)) > 5.0:
+                return True
+            return False
+        except Exception:
+            return False
 
     # -- public control -------------------------------------------------
     def toggle_pause(self) -> bool:
@@ -341,7 +661,7 @@ class AudioEngine:
             pass
 
     def _update_speaker(self, label: str) -> Optional[str]:
-        """Debounce speaker changes (3 consistent frames). Returns marker or None."""
+        """Debounce speaker changes (2 consistent frames). Returns marker or None."""
         if label == "silence":
             with self._speaker_lock:
                 self._pending_speaker = "silence"
@@ -357,7 +677,7 @@ class AudioEngine:
             else:
                 self._pending_speaker = label
                 self._pending_count = 1
-            if self._pending_count >= 3:
+            if self._pending_count >= 2:
                 self._current_speaker = label
                 self._pending_count = 0
                 marker = self.SPEAKER_MARKERS.get(label)
@@ -376,20 +696,65 @@ class AudioEngine:
 
     def set_vad_threshold(self, value: int) -> None:
         try:
-            self.vad_threshold = max(50, min(2000, int(value)))
-        except (TypeError, ValueError):
+            self.vad_threshold = max(VAD_MIN, min(VAD_MAX, int(value)))
+        except (TypeError, ValueError, OverflowError):
             pass
 
     def start(self) -> None:
-        if self._running:
-            return
-        self._stop.clear()
-        self._running = True
-        t_mix = threading.Thread(target=self._mixer_loop, name="audio-mixer", daemon=True)
-        t_lb = threading.Thread(target=self._loopback_loop, name="audio-loopback", daemon=True)
-        self._threads = [t_mix, t_lb]
-        for t in self._threads:
-            t.start()
+        # Guard against double-start races: without a lock two threads could
+        # both pass the _running check and spawn unbounded mixer/loopback
+        # threads. Hold a lifecycle lock for the whole spawn sequence.
+        try:
+            lock = getattr(self, "_lifecycle_lock", None)
+        except Exception:
+            lock = None
+        if lock is None:
+            self._lifecycle_lock = threading.Lock()
+            lock = self._lifecycle_lock
+        with lock:
+            if getattr(self, "_running", False):
+                return
+            self._stop.clear()
+            self._running = True
+            # Reset debounce state so a restarted engine never inherits a
+            # stale speaker/marker from the previous session (marker leak).
+            try:
+                with self._speaker_lock:
+                    self._pending_speaker = "silence"
+                    self._pending_count = 0
+                    self._current_speaker = "silence"
+            except Exception:
+                pass
+            # Reset adaptive VAD / pre-roll / failover state on restart
+            try:
+                self._agc_gain = 1.0
+                if hasattr(self, "_rms_window"):
+                    self._rms_window.clear()  # type: ignore[attr-defined]
+                self._last_speech_time = 0.0
+                self._in_speech = False
+                self._hangover = 0
+                try:
+                    with self._preroll_lock:
+                        self._preroll_buf = np.zeros(0, dtype=np.float32)
+                except Exception:
+                    self._preroll_buf = np.zeros(0, dtype=np.float32)  # type: ignore[attr-defined]
+                self._lb_silent_since = None
+            except Exception:
+                pass
+            # Drop any stale mic frames queued from the previous session.
+            try:
+                while True:
+                    self._mic_buffer.get_nowait()
+            except Exception:
+                pass
+            t_mix = threading.Thread(target=self._mixer_loop, name="audio-mixer", daemon=True)
+            t_lb = threading.Thread(target=self._loopback_loop, name="audio-loopback", daemon=True)
+            self._threads = [t_mix, t_lb]
+            for t in self._threads:
+                try:
+                    t.start()
+                except Exception as e:
+                    log.debug("thread start failed: %s", e)
         if self.mic_enabled:
             self._start_mic_stream()
         else:
@@ -398,21 +763,49 @@ class AudioEngine:
                  self.audio_mode, self.mic_enabled, self.mic_index, self.loopback_name or "<auto>", self.vad_threshold)
 
     def stop(self) -> None:
-        self._stop.set()
-        self._running = False
         try:
-            if self._mic_stream is not None:
-                self._mic_stream.stop()
-                self._mic_stream.close()
+            self._stop.set()
         except Exception:
             pass
-        self._mic_stream = None
-        for t in self._threads:
+        try:
+            self._running = False
+        except Exception:
+            pass
+        try:
+            mic = self._mic_stream
+        except Exception:
+            mic = None
+        try:
+            if mic is not None:
+                try:
+                    mic.stop()
+                except Exception:
+                    pass
+                try:
+                    mic.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            self._mic_stream = None
+        except Exception:
+            pass
+        try:
+            threads = list(self._threads or [])
+        except Exception:
+            threads = []
+        for t in threads:
             try:
+                if t is threading.current_thread():
+                    continue
                 t.join(timeout=1.5)
             except Exception:
                 pass
-        self._threads = []
+        try:
+            self._threads = []
+        except Exception:
+            pass
 
     # -- mic ------------------------------------------------------------
     def _start_mic_stream(self) -> None:
@@ -433,7 +826,10 @@ class AudioEngine:
                 except Exception as e:
                     log.debug("mic cb error: %s", e)
 
-            self._mic_buffer: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=50)
+            # Reuse the init-time bounded queue (mixer may already be blocked
+            # in Queue.get on it); recreating it here would orphan that wait.
+            if getattr(self, "_mic_buffer", None) is None:
+                self._mic_buffer = queue.Queue(maxsize=50)  # type: ignore[assignment]
             stream_kwargs = dict(samplerate=TARGET_RATE, channels=1, dtype="int16",
                                  blocksize=self.chunk_samples, callback=_cb)
             if self.mic_index is not None:
@@ -459,7 +855,23 @@ class AudioEngine:
 
     # -- loopback -------------------------------------------------------
     def _resolve_speaker(self, loopbacks):
-        """Pick loopback device: preferred substring wins, else first (auto)."""
+        """Pick loopback device: override (failover) > preferred substring > first."""
+        try:
+            override = (getattr(self, "_loopback_override", "") or "").strip()
+            if override:
+                for m in loopbacks:
+                    try:
+                        if str(m.name) == override:
+                            return m
+                    except Exception:
+                        continue
+                # override not in fresh enumeration; clear and fall through
+                try:
+                    self._loopback_override = ""
+                except Exception:
+                    pass
+        except Exception:
+            pass
         try:
             if self.loopback_name:
                 pref = self.loopback_name.strip().lower()
@@ -469,15 +881,48 @@ class AudioEngine:
                             return m
                     except Exception:
                         continue
-                try:
-                    return sc.get_microphone(self.loopback_name, include_loopback=True)
-                except Exception as e:
-                    log.warning("get_microphone(%s, loopback) failed: %s", self.loopback_name, e)
+                # Only try direct lookup when we have no enumeration to
+                # fail over to; if a fresh list exists but the preferred
+                # name is absent we fall through to first device below.
+                if not loopbacks:
+                    try:
+                        return sc.get_microphone(self.loopback_name, include_loopback=True)
+                    except Exception as e:
+                        log.warning("get_microphone(%s, loopback) failed: %s", self.loopback_name, e)
+                else:
+                    log.debug("preferred loopback %s not in %s; using list", self.loopback_name, [getattr(m, "name", "") for m in loopbacks])
         except Exception:
             pass
         if loopbacks:
             return loopbacks[0]
         return None
+
+    def _pick_failover_device(self, loopbacks, current_name: str = ""):
+        """Return the next loopback device after ``current_name`` (cyclic)."""
+        try:
+            if not loopbacks:
+                return None
+            if len(loopbacks) == 1:
+                return loopbacks[0]
+            idx = -1
+            for i, m in enumerate(loopbacks):
+                try:
+                    if str(getattr(m, "name", "")) == (current_name or ""):
+                        idx = i
+                        break
+                except Exception:
+                    continue
+            nxt = loopbacks[(idx + 1) % len(loopbacks)]
+            try:
+                self._loopback_override = str(getattr(nxt, "name", "") or "")
+            except Exception:
+                pass
+            return nxt
+        except Exception:
+            try:
+                return loopbacks[0] if loopbacks else None
+            except Exception:
+                return None
 
     def _loopback_loop(self) -> None:
         if not _HAS_SC:
@@ -485,12 +930,11 @@ class AudioEngine:
             log.warning("No soundcard; system-audio capture disabled.")
             return
         # COM must be initialized on this thread (WASAPI/soundcard), else
-        # get_microphone/all_microphones fail with CO_E_NOTINITIALIZED (0x800401f0)
-        try:
-            import ctypes
-            ctypes.windll.ole32.CoInitialize(None)
-        except Exception:
-            pass
+        # get_microphone/all_microphones fail with CO_E_NOTINITIALIZED (0x800401f0).
+        # Use the shared helper so init/release stay balanced even when the
+        # thread was already initialized (S_FALSE) or when CoInitialize
+        # fails with a mode mismatch — never unconditionally CoUninitialize.
+        _com_owned = _ensure_com()
         try:
             idle_cycles = 0
             while not self._stop.is_set():
@@ -502,11 +946,23 @@ class AudioEngine:
                                      if getattr(m, "isloopback", False)]
                     except Exception:
                         loopbacks = []
-                    speaker = self._resolve_speaker(loopbacks)
+                    if getattr(self, "_need_failover", False):
+                        prev = getattr(self, "_active_loopback", "") or self.loopback_name or ""
+                        nxt = self._pick_failover_device(loopbacks, prev)
+                        if nxt is not None:
+                            speaker = nxt
+                            try:
+                                self._need_failover = False
+                            except Exception:
+                                pass
+                        else:
+                            speaker = self._resolve_speaker(loopbacks)
+                    else:
+                        speaker = self._resolve_speaker(loopbacks)
                     if speaker is None:
                         self._set_lb_status(False, "No system-audio device found. Play audio / check output device.")
                         with self._lb_lock:
-                            self._latest_loopback = np.zeros(self.chunk_samples, dtype=np.float32)
+                            self._latest_loopback = np.zeros(max(int(PREROLL_SAMPLES), int(self.chunk_samples) * 4), dtype=np.float32)
                         time.sleep(2.0)
                         continue
                     try:
@@ -526,24 +982,54 @@ class AudioEngine:
                                 # device changed / unplugged -> break out and re-enumerate
                                 self._set_lb_status(False, f"Device lost ({e}); retrying…", active_name)
                                 with self._lb_lock:
-                                    self._latest_loopback = np.zeros(self.chunk_samples, dtype=np.float32)
+                                    self._latest_loopback = np.zeros(max(int(PREROLL_SAMPLES), int(self.chunk_samples) * 4), dtype=np.float32)
                                 time.sleep(0.5)
                                 break
                             try:
+                                # Resample in float32 (-1..1) then scale to int16
+                                # range. Energy is computed on the pre-scaled
+                                # float32 signal (pre-normalized) here so health
+                                # checks are not distorted by AGC/mix gain.
                                 mono = _to_mono(data)
-                                res = _resample_mono(mono * 32767.0, sample_rate, TARGET_RATE)
+                                res_f32 = _resample_mono(mono, sample_rate, TARGET_RATE)
+                                try:
+                                    energy_pre = float(np.abs(res_f32).mean() * 32767.0) if res_f32.size else 0.0
+                                except Exception:
+                                    energy_pre = 0.0
+                                res = (res_f32 * 32767.0).astype(np.float32)
                                 if not first_sound:
                                     try:
-                                        if float(np.abs(res).mean()) > 500.0:
+                                        if energy_pre > 500.0:
                                             first_sound = True
                                             log.info("loopback first sound detected on %s", active_name or "<auto>")
                                     except Exception:
                                         pass
+                                # Auto-failover: sustained digital silence while
+                                # the recorder itself is healthy means we are
+                                # pinned to the wrong output device (e.g. a
+                                # silent endpoint). Break out to re-enumerate
+                                # and switch to the next loopback device.
+                                try:
+                                    if self._check_loopback_failover(energy_pre):
+                                        log.warning("loopback silent >5s on %s; re-enumerating / failover", active_name or "<auto>")
+                                        self._set_lb_status(False, f"Silent device {active_name}; switching…", active_name)
+                                        self._lb_failover_count = int(getattr(self, "_lb_failover_count", 0) or 0) + 1
+                                        self._need_failover = True
+                                        self._lb_silent_since = None
+                                        with self._lb_lock:
+                                            keep = max(int(PREROLL_SAMPLES), int(self.chunk_samples) * 4)
+                                            self._latest_loopback = np.zeros(keep, dtype=np.float32)
+                                        break
+                                except Exception:
+                                    pass
                                 with self._lb_lock:
-                                    # keep rolling buffer of latest chunk_samples
-                                    buf = np.concatenate([self._latest_loopback, res])[-self.chunk_samples * 4:]
+                                    # Keep >= PREROLL_SAMPLES (~300ms) of
+                                    # history for onset context. Mixer reads
+                                    # the last chunk_samples of this buffer.
+                                    keep = max(int(PREROLL_SAMPLES), int(self.chunk_samples) * 4)
+                                    buf = np.concatenate([self._latest_loopback, res])[-keep:]
                                     if len(buf) >= self.chunk_samples:
-                                        self._latest_loopback = buf[-self.chunk_samples:].astype(np.float32)
+                                        self._latest_loopback = buf.astype(np.float32)
                                     else:
                                         self._latest_loopback = np.pad(buf, (self.chunk_samples - len(buf), 0))
                                 idle_cycles = 0
@@ -554,23 +1040,29 @@ class AudioEngine:
                     self._set_lb_status(False, f"{e}; retrying…", active_name)
                     with self._lb_lock:
                         try:
-                            self._latest_loopback = np.zeros(self.chunk_samples, dtype=np.float32)
+                            self._latest_loopback = np.zeros(max(int(PREROLL_SAMPLES), int(self.chunk_samples) * 4), dtype=np.float32)
                         except Exception:
                             pass
                     time.sleep(2.0)
                     continue
         finally:
-            try:
-                import ctypes
-                ctypes.windll.ole32.CoUninitialize()
-            except Exception:
-                pass
+            if _com_owned:
+                _release_com()
 
     # -- mixer ----------------------------------------------------------
     def _mixer_loop(self) -> None:
-        zeros = np.zeros(self.chunk_samples, dtype=np.float32)
-        system_only = not self.mic_enabled
-        next_t = time.monotonic()
+        try:
+            zeros = np.zeros(int(getattr(self, "chunk_samples", CHUNK_SAMPLES) or CHUNK_SAMPLES), dtype=np.float32)
+        except Exception:
+            zeros = np.zeros(CHUNK_SAMPLES, dtype=np.float32)
+        try:
+            system_only = not bool(getattr(self, "mic_enabled", False))
+        except Exception:
+            system_only = True
+        try:
+            next_t = time.monotonic()
+        except Exception:
+            next_t = 0.0
         while not self._stop.is_set():
             try:
                 if system_only:
@@ -603,60 +1095,101 @@ class AudioEngine:
                     mic_energy = float(np.abs(mic_frame).mean()) if mic_frame.size else 0.0
 
                 with self._lb_lock:
-                    lb = np.asarray(self._latest_loopback, dtype=np.float32).ravel()
-                if len(lb) < self.chunk_samples:
-                    lb = np.pad(lb, (0, self.chunk_samples - len(lb)))
-                lb = lb[: self.chunk_samples]
+                    lb_raw_full = np.asarray(self._latest_loopback, dtype=np.float32).ravel()
+                # Mixer consumes the most-recent chunk_samples of the rolling
+                # >=PREROLL_SAMPLES buffer (not the oldest samples).
+                if len(lb_raw_full) >= self.chunk_samples:
+                    lb_raw = lb_raw_full[-self.chunk_samples:].copy()
+                elif len(lb_raw_full) > 0:
+                    lb_raw = np.pad(lb_raw_full, (0, self.chunk_samples - len(lb_raw_full)))
+                else:
+                    lb_raw = zeros.copy()
 
                 if self._paused.is_set():
                     continue  # context saver: emit nothing while paused
 
+                # AGC-normalize loopback before energy / VAD checks so
+                # quiet meeting speech clears the gate.
+                try:
+                    lb = self._apply_agc(lb_raw) if hasattr(self, "_apply_agc") else np.asarray(lb_raw, dtype=np.float32)
+                except Exception:
+                    lb = np.asarray(lb_raw, dtype=np.float32)
+                try:
+                    if lb is None or getattr(lb, "size", 0) == 0:
+                        lb = zeros.copy()
+                    else:
+                        lb = np.asarray(lb, dtype=np.float32).ravel()
+                        if len(lb) < self.chunk_samples:
+                            lb = np.pad(lb, (0, self.chunk_samples - len(lb)))
+                        lb = lb[: self.chunk_samples]
+                except Exception:
+                    lb = zeros.copy()
+
+                try:
+                    rms_agc = float(np.sqrt(np.mean(lb.astype(np.float32) ** 2))) if lb.size else 0.0
+                    peak_agc = float(np.max(np.abs(lb))) if lb.size else 0.0
+                    self._note_rms(rms_agc, peak_agc)
+                except Exception:
+                    pass
+                try:
+                    eff = float(self.effective_threshold())
+                except Exception:
+                    eff = float(getattr(self, "vad_threshold", VAD_DEFAULT))
+
                 lb_energy = float(np.abs(lb).mean()) if lb.size else 0.0
                 if system_only:
-                    speaker = "interviewer" if lb_energy >= float(self.vad_threshold) else "silence"
-                    # map to system marker
+                    speaker = "interviewer" if lb_energy >= eff else "silence"
                     if speaker == "interviewer":
                         speaker = "system"
                 else:
-                    speaker = classify_speaker(mic_energy, lb_energy, float(self.vad_threshold))
+                    speaker = classify_speaker(mic_energy, lb_energy, eff)
                 self._update_speaker(speaker)
 
                 mixed = np.clip(mic_frame + lb, -32768, 32767)
                 energy = float(np.abs(mixed).mean()) if mixed.size else 0.0
-                if energy < float(self.vad_threshold):
-                    # Trailing-silence hangover: after speech ends, keep sending
-                    # a few silent frames so the server's endpointing fires fast.
-                    # Without this the server may wait tens of seconds for a pause.
-                    if getattr(self, "_hangover", 0) > 0:
+                is_speech = energy >= eff
+                if is_speech:
+                    now_mono = time.monotonic()
+                    try:
+                        self._last_speech_time = float(now_mono)
+                    except Exception:
+                        pass
+                    # Flush pre-roll first: delivers the first ~200-300ms of
+                    # the utterance that arrived below threshold.
+                    if not bool(getattr(self, "_in_speech", False)):
+                        try:
+                            for pre_pcm in self._take_preroll_pcm():
+                                self._enqueue_pcm(pre_pcm)
+                                self._note_stats(lb_energy, energy, speaker, True)
+                        except Exception:
+                            pass
+                    self._in_speech = True
+                    self._hangover = int(HANGOVER_FRAMES)  # 128ms trailing
+                    pcm = mixed.astype(np.int16).tobytes()
+                    sent = self._enqueue_pcm(pcm)
+                    self._note_stats(lb_energy, energy, speaker, bool(sent))
+                else:
+                    # Sub-threshold: buffer for onset pre-roll (never drop
+                    # the first 200ms of the next utterance).
+                    try:
+                        self._accumulate_preroll(mixed)
+                    except Exception:
+                        pass
+                    if bool(getattr(self, "_in_speech", False)) and int(getattr(self, "_hangover", 0) or 0) > 0:
+                        # Trailing hangover: keep sending real trailing
+                        # frames (2 frames) so endpointing fires fast.
                         try:
                             self._hangover -= 1
-                            pcm0 = np.zeros(self.chunk_samples, dtype=np.int16).tobytes()
-                            if self.output_queue.full():
-                                try:
-                                    self.output_queue.get_nowait()
-                                except queue.Empty:
-                                    pass
-                            self.output_queue.put_nowait(pcm0)
-                            self._note_stats(lb_energy, 0.0, "silence", True)
-                        except queue.Full:
-                            pass
-                        continue
-                    self._note_stats(lb_energy, energy, speaker, False)
-                    continue  # drop silence to save tokens
-                self._hangover = 6  # ~400ms of trailing silence on speech end
-
-                pcm = mixed.astype(np.int16).tobytes()
-                try:
-                    if self.output_queue.full():
-                        try:
-                            self.output_queue.get_nowait()
-                        except queue.Empty:
-                            pass
-                    self.output_queue.put_nowait(pcm)
-                    self._note_stats(lb_energy, energy, speaker, True)
-                except queue.Full:
-                    self._note_stats(lb_energy, energy, speaker, False)
-                    pass
+                            pcm = mixed.astype(np.int16).tobytes()
+                            sent = self._enqueue_pcm(pcm)
+                            if int(getattr(self, "_hangover", 0) or 0) <= 0:
+                                self._in_speech = False
+                            self._note_stats(lb_energy, energy, speaker, bool(sent))
+                        except Exception:
+                            self._in_speech = False
+                    else:
+                        self._in_speech = False
+                        self._note_stats(lb_energy, energy, speaker, False)
             except Exception as e:
                 log.debug("mixer error: %s", e)
                 time.sleep(0.02)

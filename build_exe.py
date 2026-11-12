@@ -90,25 +90,33 @@ def ensure_version_info(base: str) -> str | None:
         return None
 
 
-def build(onefile: bool = False, clean: bool = True) -> int:
+def build(onefile: bool = False, console: bool = False, clean: bool = True) -> int:
     base = os.path.dirname(os.path.abspath(__file__))
     entry = os.path.join(base, ENTRY)
     if not os.path.exists(entry):
         print(f"Entry not found: {entry}", file=sys.stderr)
+        print("Run this script from the project root (next to main.py).", file=sys.stderr)
         return 2
 
     try:
         import PyInstaller  # noqa: F401
     except ImportError:
-        print("PyInstaller not installed. Run: pip install pyinstaller", file=sys.stderr)
+        print(
+            f"PyInstaller not installed for this interpreter ({sys.executable}). "
+            "Run: python -m pip install -r requirements.txt",
+            file=sys.stderr,
+        )
         return 2
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
         "--name", APP_NAME,
-        "--windowed",  # no console window
     ]
+    # Default is --windowed (no console). Pass --console for a frozen exe whose
+    # `--diag` output is visible (windowed builds discard stdout/stderr).
+    if not console:
+        cmd.append("--windowed")
     cmd.append("--onefile" if onefile else "--onedir")
     for h in HIDDEN_IMPORTS:
         cmd += ["--hidden-import", h]
@@ -122,10 +130,13 @@ def build(onefile: bool = False, clean: bool = True) -> int:
         "--collect-all", "soundcard",
         "--collect-all", "google",
     ]
-    # optional icon (only if the file exists)
+    # optional icon (warn, don't silently skip: a missing icon usually means
+    # the build ran from the wrong directory)
     icon_path = os.path.join(base, ICON)
     if os.path.exists(icon_path):
         cmd += ["--icon", icon_path]
+    else:
+        print(f"warning: icon not found ({icon_path}); building without --icon.", file=sys.stderr)
     # truthful version resource on Windows
     if os.name == "nt":
         ver = ensure_version_info(base)
@@ -135,25 +146,35 @@ def build(onefile: bool = False, clean: bool = True) -> int:
         cmd.append("--clean")
     cmd.append(entry)
 
-    print("Running:", " ".join(cmd))
+    print("Running:", subprocess.list2cmdline(cmd))
     rc = subprocess.call(cmd, cwd=base)
     if rc != 0:
         return rc
 
-    dist = os.path.join(base, "dist", APP_NAME + (".exe" if os.name == "nt" else ""))
-    target = os.path.join(base, "dist", APP_NAME + ".exe") if os.name == "nt" else dist
+    # PyInstaller layout differs by mode: --onedir puts the exe inside
+    # dist/<APP_NAME>/, --onefile puts the single exe at dist/<APP_NAME>.exe.
+    exe_name = APP_NAME + (".exe" if os.name == "nt" else "")
+    if onefile:
+        target = os.path.join(base, "dist", exe_name)
+    else:
+        target = os.path.join(base, "dist", APP_NAME, exe_name)
     print(f"\nBuild done. Output: {target}")
     print("Tip: test --onedir first for fast startup, then rebuild with --onefile.")
     print("Ship config.json alongside the exe (first run creates it if missing).")
+    if not console:
+        print("Note: windowed builds hide console output; use --console to see `--diag` output.")
     return 0
 
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Build InterviewCopilot Windows exe")
-    p.add_argument("--onefile", action="store_true", help="single-file exe (slower boot)")
+    p.add_argument("--onefile", action="store_true",
+                   help="single-file exe (slower boot; prefer onedir for fast startup)")
+    p.add_argument("--console", action="store_true",
+                   help="keep the console window (needed to see `--diag` output from the frozen exe)")
     p.add_argument("--no-clean", action="store_true", help="skip --clean")
     args = p.parse_args()
-    return build(onefile=args.onefile, clean=not args.no_clean)
+    return build(onefile=args.onefile, console=args.console, clean=not args.no_clean)
 
 
 if __name__ == "__main__":
